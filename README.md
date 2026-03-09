@@ -8,6 +8,12 @@
 curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh | sudo bash
 ```
 
+## ↩️ Быстрый откат (1 команда)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh | sudo bash -s -- --rollback
+```
+
 ## ⚡ Быстрый старт (3 команды)
 
 ```bash
@@ -61,6 +67,34 @@ wget -O vps_hardening.sh https://raw.githubusercontent.com/d4f1rz/vps-hardening/
 chmod +x vps_hardening.sh
 sudo bash vps_hardening.sh
 ```
+
+### Откат изменений
+
+Скрипт автоматически создает snapshot перед изменениями в каталоге:
+
+```text
+/var/backups/vps_hardening/<timestamp>/
+```
+
+Для отката последнего запуска:
+
+```bash
+sudo bash vps_hardening.sh --rollback
+```
+
+Или одной строкой без сохранения файла:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh | sudo bash -s -- --rollback
+```
+
+Что откатывается автоматически:
+
+- `/etc/ssh/sshd_config`
+- `/etc/fail2ban/jail.local`
+- UFW правила (`/etc/ufw/user.rules`, `/etc/ufw/user6.rules`)
+- Пользователь, созданный в ходе hardening
+- Пользователи, удаленные hardening-скриптом (восстанавливаются из snapshot-метаданных)
 
 ### Что изменилось в новом автоматическом режиме
 
@@ -180,6 +214,7 @@ ssh -p <ВАШ_ПОРТ> <ВАШ_ПОЛЬЗОВАТЕЛЬ>@<IP_СЕРВЕРА>
 | Флаг | Описание |
 |------|----------|
 | `--dry-run` | Симуляция без изменений в системе |
+| `--rollback` | Откат последнего запуска из snapshot-бэкапа |
 | `--help` | Справка по использованию |
 
 ## 🔍 Проверка после установки

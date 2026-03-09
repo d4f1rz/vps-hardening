@@ -1,13 +1,19 @@
 #!/bin/bash
 # VPS Hardening Script
-# Version: 1.1.0
+# Version: 1.2.0
 # Compatibility: Ubuntu 20.04+ / Debian 11+
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 LOG_FILE="/var/log/vps_hardening.log"
 DRY_RUN=0
+ROLLBACK=0
+
+BACKUP_ROOT="/var/backups/vps_hardening"
+BACKUP_ID=""
+BACKUP_DIR=""
+STATE_FILE="${BACKUP_ROOT}/last_state.env"
 
 NEW_USER=""
 NEW_USER_PASSWORD=""
@@ -22,6 +28,8 @@ ALLOWED_IPS_CSV=""
 SSH_PRIVATE_KEY_CONTENT=""
 SSH_PUBLIC_KEY_CONTENT=""
 SSH_KEY_PASSPHRASE=""
+
+DELETED_USERS_LIST_FILE=""
 
 C_RESET="\033[0m"
 C_RED="\033[31m"
@@ -51,10 +59,11 @@ init_log() {
 show_help() {
   cat <<'EOF'
 Использование:
-  bash vps_hardening.sh [--dry-run] [--help]
+  bash vps_hardening.sh [--dry-run] [--rollback] [--help]
 
 Опции:
   --dry-run   Симуляция без реальных изменений.
+  --rollback  Откат последнего применения hardening.
   --help      Показать справку.
 
 Что делает скрипт:
@@ -66,6 +75,7 @@ show_help() {
   6) Настраивает UFW (доступ: всем или только выбранным IP)
   7) Настраивает Fail2ban
   8) Перезапускает SSH и показывает итоговый отчет
+  9) Поддерживает rollback из snapshot-бэкапа
 EOF
 }
 
@@ -96,10 +106,205 @@ handle_error() {
 show_banner() {
   cat <<'EOF'
 ╔══════════════════════════════════════════════════════════╗
-║            VPS HARDENING SCRIPT v1.1.0                  ║
+║            VPS HARDENING SCRIPT v1.2.0                  ║
 ║     Автоматическая защита VPS (Ubuntu/Debian)           ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
+}
+
+save_runtime_state() {
+  if [[ "$DRY_RUN" -eq 1 || -z "$BACKUP_DIR" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$BACKUP_ROOT"
+  cat > "$STATE_FILE" <<EOF
+BACKUP_DIR="$BACKUP_DIR"
+NEW_USER="$NEW_USER"
+SSH_PORT="$SSH_PORT"
+SSH_SERVICE="$SSH_SERVICE"
+ACCESS_MODE="$ACCESS_MODE"
+ALLOWED_IPS_CSV="$ALLOWED_IPS_CSV"
+EOF
+  chmod 600 "$STATE_FILE"
+  log "State saved: $STATE_FILE"
+}
+
+init_backup_snapshot() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_warn "[DRY-RUN] Snapshot-бэкап не создается"
+    return 0
+  fi
+
+  BACKUP_ID="$(date +%Y%m%d_%H%M%S)"
+  BACKUP_DIR="${BACKUP_ROOT}/${BACKUP_ID}"
+  DELETED_USERS_LIST_FILE="${BACKUP_DIR}/deleted_users/list.txt"
+
+  mkdir -p "$BACKUP_DIR/files"
+  mkdir -p "${BACKUP_DIR}/deleted_users"
+
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    cp /etc/ssh/sshd_config "${BACKUP_DIR}/files/sshd_config.before"
+  fi
+
+  if [[ -f /etc/fail2ban/jail.local ]]; then
+    cp /etc/fail2ban/jail.local "${BACKUP_DIR}/files/jail.local.before"
+  fi
+
+  if [[ -f /etc/ufw/user.rules ]]; then
+    cp /etc/ufw/user.rules "${BACKUP_DIR}/files/ufw_user.rules.before"
+  fi
+
+  if [[ -f /etc/ufw/user6.rules ]]; then
+    cp /etc/ufw/user6.rules "${BACKUP_DIR}/files/ufw_user6.rules.before"
+  fi
+
+  ufw status verbose > "${BACKUP_DIR}/files/ufw_status.before" 2>/dev/null || true
+
+  save_runtime_state
+  print_ok "Snapshot для отката создан: ${BACKUP_DIR}"
+  log "Backup snapshot created: $BACKUP_DIR"
+}
+
+backup_deleted_user() {
+  local user="$1"
+
+  if [[ "$DRY_RUN" -eq 1 || -z "$BACKUP_DIR" ]]; then
+    return 0
+  fi
+
+  local udir="${BACKUP_DIR}/deleted_users/${user}"
+  mkdir -p "$udir"
+
+  getent passwd "$user" > "${udir}/passwd" || true
+  getent shadow "$user" > "${udir}/shadow" || true
+  id -nG "$user" > "${udir}/groups" 2>/dev/null || true
+
+  local home_dir
+  home_dir="$(getent passwd "$user" | awk -F: '{print $6}')"
+  if [[ -n "$home_dir" && -d "$home_dir" ]]; then
+    tar -czf "${udir}/home.tar.gz" -C / "${home_dir#/}" >/dev/null 2>&1 || true
+  fi
+
+  echo "$user" >> "$DELETED_USERS_LIST_FILE"
+  log "Prepared rollback backup for deleted user: $user"
+}
+
+rollback_last() {
+  print_step_header "R" "Откат конфигурации" "Восстанавливаем последнее состояние сервера из snapshot-бэкапа."
+
+  if [[ ! -f "$STATE_FILE" ]]; then
+    print_error "Файл состояния не найден: $STATE_FILE"
+    print_error "Откат невозможен: не найден snapshot предыдущего запуска."
+    exit 1
+  fi
+
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+
+  if [[ -z "${BACKUP_DIR:-}" || ! -d "${BACKUP_DIR}" ]]; then
+    print_error "Каталог snapshot не найден: ${BACKUP_DIR:-<empty>}"
+    exit 1
+  fi
+
+  print_info "Откат из: $BACKUP_DIR"
+  log "ROLLBACK start from: $BACKUP_DIR"
+
+  if [[ -f "${BACKUP_DIR}/files/sshd_config.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/sshd_config.before\" /etc/ssh/sshd_config" "Восстановление sshd_config"
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/jail.local.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/jail.local.before\" /etc/fail2ban/jail.local" "Восстановление jail.local"
+  else
+    if [[ -f /etc/fail2ban/jail.local ]]; then
+      run_cmd "rm -f /etc/fail2ban/jail.local" "Удаление созданного jail.local"
+    fi
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/ufw_user.rules.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/ufw_user.rules.before\" /etc/ufw/user.rules" "Восстановление UFW IPv4 правил"
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/ufw_user6.rules.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/ufw_user6.rules.before\" /etc/ufw/user6.rules" "Восстановление UFW IPv6 правил"
+  fi
+
+  run_cmd "ufw --force reload" "Перезагрузка UFW"
+
+  local restore_user
+  local list_file="${BACKUP_DIR}/deleted_users/list.txt"
+  if [[ -f "$list_file" ]]; then
+    while IFS= read -r restore_user; do
+      [[ -z "$restore_user" ]] && continue
+
+      local udir="${BACKUP_DIR}/deleted_users/${restore_user}"
+      local passwd_line
+      local shadow_line
+
+      passwd_line="$(cat "${udir}/passwd" 2>/dev/null || true)"
+      shadow_line="$(cat "${udir}/shadow" 2>/dev/null || true)"
+
+      if [[ -z "$passwd_line" ]]; then
+        continue
+      fi
+
+      if id "$restore_user" >/dev/null 2>&1; then
+        print_warn "Пользователь ${restore_user} уже существует, пропускаем восстановление."
+      else
+        local x name uid gid gecos home shell
+        IFS=':' read -r name x uid gid gecos home shell <<< "$passwd_line"
+
+        if ! getent group "$gid" >/dev/null 2>&1; then
+          run_cmd "groupadd -g ${gid} ${name}" "Восстановление primary group для ${name}"
+        fi
+
+        run_cmd "useradd -u ${uid} -g ${gid} -d \"${home}\" -s \"${shell}\" -c \"${gecos}\" -M ${name}" "Восстановление пользователя ${name}"
+
+        if [[ -n "$shadow_line" ]]; then
+          local hash
+          hash="$(echo "$shadow_line" | awk -F: '{print $2}')"
+          if [[ -n "$hash" ]]; then
+            run_cmd "usermod -p '${hash}' ${name}" "Восстановление hash-пароля для ${name}"
+          fi
+        fi
+
+        if [[ -f "${udir}/groups" ]]; then
+          local g
+          for g in $(cat "${udir}/groups"); do
+            if [[ "$g" == "$name" ]]; then
+              continue
+            fi
+            if getent group "$g" >/dev/null 2>&1; then
+              run_cmd "usermod -aG ${g} ${name}" "Возврат группы ${g} для ${name}"
+            fi
+          done
+        fi
+
+        if [[ -f "${udir}/home.tar.gz" ]]; then
+          run_cmd "tar -xzf \"${udir}/home.tar.gz\" -C /" "Восстановление home для ${name}"
+          run_cmd "chown -R ${name}:${name} \"${home}\"" "Исправление владельца home для ${name}"
+        fi
+      fi
+    done < "$list_file"
+  fi
+
+  if [[ -n "${NEW_USER:-}" && "$NEW_USER" != "root" ]]; then
+    if id "$NEW_USER" >/dev/null 2>&1; then
+      run_cmd "userdel -r \"${NEW_USER}\"" "Удаление пользователя hardening: ${NEW_USER}"
+    fi
+  fi
+
+  if [[ -n "${SSH_SERVICE:-}" ]]; then
+    run_cmd "systemctl restart ${SSH_SERVICE}" "Перезапуск SSH после отката"
+  else
+    run_cmd "systemctl restart sshd || systemctl restart ssh" "Перезапуск SSH после отката"
+  fi
+
+  run_cmd "systemctl restart fail2ban || true" "Перезапуск Fail2ban после отката"
+
+  print_ok "Откат завершен. Проверьте доступ к серверу и статус сервисов."
+  log "ROLLBACK finished"
 }
 
 print_step_header() {
@@ -117,6 +322,9 @@ parse_args() {
     case "$1" in
       --dry-run)
         DRY_RUN=1
+        ;;
+      --rollback)
+        ROLLBACK=1
         ;;
       --help|-h)
         show_help
@@ -337,6 +545,7 @@ prune_old_users() {
       continue
     fi
 
+    backup_deleted_user "$user"
     run_cmd "userdel -r \"${user}\"" "Удаление старого пользователя ${user}"
   done < /etc/passwd
 }
@@ -376,6 +585,8 @@ step_2_user_management() {
 
   run_cmd "usermod -aG sudo \"${NEW_USER}\"" "Добавление ${NEW_USER} в группу sudo"
   run_cmd "id \"${NEW_USER}\"" "Проверка пользователя ${NEW_USER}"
+
+  save_runtime_state
 
   prune_old_users
 
@@ -457,6 +668,8 @@ step_4_secure_ssh_access() {
   set_sshd_option "X11Forwarding" "no"
   set_sshd_option "MaxAuthTries" "3"
   set_sshd_option "LoginGraceTime" "20"
+
+  save_runtime_state
 
   local sshd_bin
   sshd_bin="$(command -v sshd || true)"
@@ -605,6 +818,11 @@ main() {
   check_os
   detect_ssh_service
 
+  if [[ "$ROLLBACK" -eq 1 ]]; then
+    rollback_last
+    exit 0
+  fi
+
   show_banner
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -617,6 +835,8 @@ main() {
   fi
 
   choose_access_mode
+  init_backup_snapshot
+  save_runtime_state
 
   step_1_update_system
   step_2_user_management
