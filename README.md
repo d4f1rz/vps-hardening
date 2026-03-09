@@ -185,7 +185,3 @@ fail2ban-client set sshd unbanip <IP>
 
 - Ubuntu `20.04+`
 - Debian `11+`
-
-## Лицензия
-
-MIT
