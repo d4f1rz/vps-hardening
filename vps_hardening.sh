@@ -21,6 +21,11 @@ MAINT_LOG_FILE="/var/log/vps_hardening_maintenance.log"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/vps-hardening-maintenance.service"
 SYSTEMD_TIMER_FILE="/etc/systemd/system/vps-hardening-maintenance.timer"
 DEFAULT_SELF_UPDATE_URL="https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh"
+DEFERRED_DELETE_DIR="/var/lib/vps-hardening"
+DEFERRED_DELETE_LIST="${DEFERRED_DELETE_DIR}/deferred_delete_users.list"
+DEFERRED_DELETE_SCRIPT="/usr/local/sbin/vps_hardening_deferred_delete.sh"
+DEFERRED_DELETE_SERVICE="/etc/systemd/system/vps-hardening-deferred-delete.service"
+DEFERRED_DELETE_TIMER="/etc/systemd/system/vps-hardening-deferred-delete.timer"
 
 NEW_USER=""
 NEW_USER_PASSWORD=""
@@ -365,7 +370,7 @@ rollback_last() {
 
   if [[ -n "${NEW_USER:-}" && "$NEW_USER" != "root" ]]; then
     if id "$NEW_USER" >/dev/null 2>&1; then
-      run_cmd "userdel -r \"${NEW_USER}\"" "Удаление пользователя hardening: ${NEW_USER}"
+      safe_delete_user "$NEW_USER" "Удаление пользователя hardening: ${NEW_USER}"
     fi
   fi
 
@@ -407,7 +412,9 @@ reset_to_legacy_baseline() {
 
   # Удаляем automation артефакты, если были.
   run_cmd "systemctl disable --now vps-hardening-maintenance.timer || true" "Отключение timer auto-maintenance"
+  run_cmd "systemctl disable --now vps-hardening-deferred-delete.timer || true" "Отключение timer отложенного удаления"
   run_cmd "rm -f \"${SYSTEMD_TIMER_FILE}\" \"${SYSTEMD_SERVICE_FILE}\" \"${MAINT_SCRIPT_PATH}\" \"${AUTOMATION_CONFIG_FILE}\"" "Удаление automation-файлов"
+  run_cmd "rm -f \"${DEFERRED_DELETE_TIMER}\" \"${DEFERRED_DELETE_SERVICE}\" \"${DEFERRED_DELETE_SCRIPT}\" \"${DEFERRED_DELETE_LIST}\"" "Удаление файлов отложенного удаления"
   run_cmd "systemctl daemon-reload" "Обновление systemd после удаления automation"
 
   # SSH к более дефолтному состоянию.
@@ -451,7 +458,7 @@ reset_to_legacy_baseline() {
     if [[ "$shell" == */nologin || "$shell" == */false ]]; then
       continue
     fi
-    run_cmd "userdel -r \"${user}\"" "Удаление пользователя ${user} при переустановке"
+    safe_delete_user "$user" "Удаление пользователя ${user} при переустановке"
   done < /etc/passwd
 
   # UFW и Fail2ban к базовому виду.
@@ -758,6 +765,123 @@ set_sshd_option() {
   log "sshd_config set: $key $value"
 }
 
+is_user_logged_in() {
+  local user="$1"
+  who 2>/dev/null | awk '{print $1}' | grep -Fxq "$user"
+}
+
+ensure_deferred_delete_timer() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
+
+  mkdir -p "$DEFERRED_DELETE_DIR"
+
+  cat > "$DEFERRED_DELETE_SCRIPT" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+LIST_FILE="/var/lib/vps-hardening/deferred_delete_users.list"
+LOG_FILE="/var/log/vps_hardening.log"
+
+touch "$LIST_FILE"
+
+tmp_file="/tmp/vps_hardening_deferred_users.$$"
+> "$tmp_file"
+
+while IFS= read -r user; do
+  [[ -z "$user" ]] && continue
+  if ! id "$user" >/dev/null 2>&1; then
+    continue
+  fi
+
+  if who 2>/dev/null | awk '{print $1}' | grep -Fxq "$user"; then
+    echo "$user" >> "$tmp_file"
+    echo "[$(date '+%F %T')] Deferred delete: user $user still logged in" >> "$LOG_FILE"
+    continue
+  fi
+
+  if userdel -r "$user" >> "$LOG_FILE" 2>&1; then
+    echo "[$(date '+%F %T')] Deferred delete: removed user $user" >> "$LOG_FILE"
+  else
+    echo "$user" >> "$tmp_file"
+    echo "[$(date '+%F %T')] Deferred delete: failed for $user, will retry" >> "$LOG_FILE"
+  fi
+done < "$LIST_FILE"
+
+mv "$tmp_file" "$LIST_FILE"
+
+if [[ ! -s "$LIST_FILE" ]]; then
+  systemctl disable --now vps-hardening-deferred-delete.timer >/dev/null 2>&1 || true
+fi
+EOF
+  chmod 700 "$DEFERRED_DELETE_SCRIPT"
+
+  cat > "$DEFERRED_DELETE_SERVICE" <<EOF
+[Unit]
+Description=Deferred user deletion for VPS hardening
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${DEFERRED_DELETE_SCRIPT}
+User=root
+Group=root
+EOF
+
+  cat > "$DEFERRED_DELETE_TIMER" <<EOF
+[Unit]
+Description=Retry deferred user deletion
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+Unit=vps-hardening-deferred-delete.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  run_cmd "systemctl daemon-reload" "Перечитывание systemd unit-файлов (deferred delete)"
+  run_cmd "systemctl enable --now vps-hardening-deferred-delete.timer" "Включение таймера отложенного удаления пользователей"
+}
+
+enqueue_deferred_delete_user() {
+  local user="$1"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_warn "[DRY-RUN] Пользователь ${user} был бы добавлен в отложенное удаление"
+    return 0
+  fi
+
+  ensure_deferred_delete_timer
+
+  touch "$DEFERRED_DELETE_LIST"
+  if ! grep -Fxq "$user" "$DEFERRED_DELETE_LIST"; then
+    echo "$user" >> "$DEFERRED_DELETE_LIST"
+  fi
+
+  log "User scheduled for deferred deletion: $user"
+}
+
+safe_delete_user() {
+  local user="$1"
+  local action_label="$2"
+
+  if [[ -z "$user" || "$user" == "root" ]]; then
+    return 0
+  fi
+
+  if is_user_logged_in "$user"; then
+    print_warn "Пользователь ${user} сейчас в активной сессии. Удаление отложено автоматически."
+    enqueue_deferred_delete_user "$user"
+    return 0
+  fi
+
+  run_cmd "userdel -r \"${user}\"" "$action_label"
+}
+
 prune_old_users() {
   local user
   while IFS=: read -r user _ uid _ _ _ shell; do
@@ -772,7 +896,7 @@ prune_old_users() {
     fi
 
     backup_deleted_user "$user"
-    run_cmd "userdel -r \"${user}\"" "Удаление старого пользователя ${user}"
+    safe_delete_user "$user" "Удаление старого пользователя ${user}"
   done < /etc/passwd
 }
 
