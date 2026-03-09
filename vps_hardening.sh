@@ -413,6 +413,7 @@ reset_to_legacy_baseline() {
   # SSH к более дефолтному состоянию.
   if [[ -f /etc/ssh/sshd_config ]]; then
     set_sshd_defaults_for_reinstall
+    run_cmd "rm -f /etc/ssh/sshd_config.bak" "Удаление старого sshd_config.bak маркера"
     local sshd_bin
     sshd_bin="$(command -v sshd || true)"
     if [[ -n "$sshd_bin" ]]; then
@@ -471,8 +472,8 @@ is_hardening_already_present() {
     return 0
   fi
 
-  # Наследие старых версий: sshd backup, jail.local, активный ufw, измененный SSH.
-  if [[ -f /etc/ssh/sshd_config.bak || -f /etc/fail2ban/jail.local ]]; then
+  # Наследие старых версий: jail.local, активный ufw, измененный SSH.
+  if [[ -f /etc/fail2ban/jail.local ]]; then
     return 0
   fi
 
@@ -487,6 +488,9 @@ is_hardening_already_present() {
       return 0
     fi
     if grep -Eq '^[[:space:]]*PermitRootLogin[[:space:]]+no' /etc/ssh/sshd_config; then
+      return 0
+    fi
+    if grep -Eq '^[[:space:]]*PasswordAuthentication[[:space:]]+no' /etc/ssh/sshd_config; then
       return 0
     fi
   fi
@@ -616,7 +620,17 @@ validate_ip_or_cidr() {
 gen_secret() {
   local len="$1"
   local chars='A-Za-z0-9!@#%^*_+=-'
-  LC_ALL=C tr -dc "$chars" < /dev/urandom | head -c "$len"
+  local result=""
+
+  # В режиме pipefail конвейер tr|head может завершаться SIGPIPE.
+  # Поэтому временно выключаем pipefail и добираем длину в цикле.
+  set +o pipefail
+  while [[ "${#result}" -lt "$len" ]]; do
+    result+="$(LC_ALL=C tr -dc "$chars" < /dev/urandom | head -c "$len")"
+  done
+  set -o pipefail
+
+  echo "${result:0:$len}"
 }
 
 check_root() {
