@@ -37,6 +37,16 @@ CLIENT_IP=""
 ACCESS_MODE="all"     # all | selected
 ALLOWED_IPS_CSV=""
 
+# ACL таблица для режима selected.
+declare -a ACL_NAMES=()
+declare -a ACL_IPS=()
+declare -a ACL_PROFILES=()
+declare -a ACL_PORTS=()
+
+PROFILE_SSH_ONLY="__SSH__"
+PROFILE_MARZBAN_HOST="__SSH__,80,443,2053,2083,2087,2096,8443"
+PROFILE_MARZBAN_NODE="__SSH__,443,2053,2083,2087,2096,8443"
+
 SSH_PRIVATE_KEY_CONTENT=""
 SSH_PUBLIC_KEY_CONTENT=""
 SSH_KEY_PASSPHRASE=""
@@ -695,6 +705,127 @@ get_client_ip() {
   log "Client IP detected: $CLIENT_IP"
 }
 
+validate_ports_csv() {
+  local csv="$1"
+  local p
+  IFS=',' read -r -a ports <<< "$csv"
+  for p in "${ports[@]}"; do
+    p="$(echo "$p" | xargs)"
+    if [[ "$p" == "__SSH__" ]]; then
+      continue
+    fi
+    if ! validate_port "$p"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+acl_add_entry() {
+  local name="$1"
+  local ip="$2"
+  local profile="$3"
+  local ports_csv="$4"
+
+  ACL_NAMES+=("$name")
+  ACL_IPS+=("$ip")
+  ACL_PROFILES+=("$profile")
+  ACL_PORTS+=("$ports_csv")
+}
+
+acl_render_table() {
+  echo
+  echo "╔════════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║ ACL СПИСОК ДОПУСКА (режим selected)                                              ║"
+  echo "╠════╦════════════════════╦══════════════════════╦════════════════╦═════════════════╣"
+  echo "║ #  ║ Name               ║ IP/CIDR              ║ Profile        ║ Allow ports     ║"
+  echo "╠════╬════════════════════╬══════════════════════╬════════════════╬═════════════════╣"
+
+  local i
+  if [[ "${#ACL_NAMES[@]}" -eq 0 ]]; then
+    echo "║ -- ║ (пока пусто)       ║ -                    ║ -              ║ -               ║"
+  else
+    for ((i=0; i<${#ACL_NAMES[@]}; i++)); do
+      printf "║ %-2s ║ %-18s ║ %-20s ║ %-14s ║ %-15s ║\n" "$((i+1))" "${ACL_NAMES[$i]}" "${ACL_IPS[$i]}" "${ACL_PROFILES[$i]}" "${ACL_PORTS[$i]}"
+    done
+  fi
+
+  echo "╚════╩════════════════════╩══════════════════════╩════════════════╩═════════════════╝"
+}
+
+acl_collect_entry_interactive() {
+  local entry_name=""
+  local entry_ip=""
+  local profile_choice=""
+  local ports_csv=""
+  local profile_name=""
+
+  while true; do
+    read -r -p "Введите имя записи (например node-1): " entry_name
+    entry_name="${entry_name:-entry-$((${#ACL_NAMES[@]}+1))}"
+    if [[ "$entry_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      break
+    fi
+    print_warn "Имя записи: только буквы/цифры/._-"
+  done
+
+  while true; do
+    read -r -p "Введите IP/CIDR: " entry_ip
+    if validate_ip_or_cidr "$entry_ip"; then
+      break
+    fi
+    print_warn "Некорректный IP/CIDR. Пример: 1.2.3.4 или 5.6.7.0/24"
+  done
+
+  echo
+  echo "Выберите профиль портов:"
+  echo "  1) ssh-only      (__SSH__)"
+  echo "  2) marzban-host  (__SSH__,80,443,2053,2083,2087,2096,8443)"
+  echo "  3) marzban-node  (__SSH__,443,2053,2083,2087,2096,8443)"
+  echo "  4) custom        (ввести вручную)"
+
+  while true; do
+    read -r -p "Ваш выбор [1/2/3/4]: " profile_choice
+    case "$profile_choice" in
+      1)
+        profile_name="ssh-only"
+        ports_csv="$PROFILE_SSH_ONLY"
+        break
+        ;;
+      2)
+        profile_name="marzban-host"
+        ports_csv="$PROFILE_MARZBAN_HOST"
+        break
+        ;;
+      3)
+        profile_name="marzban-node"
+        ports_csv="$PROFILE_MARZBAN_NODE"
+        break
+        ;;
+      4)
+        profile_name="custom"
+        while true; do
+          read -r -p "Введите порты через запятую (можно __SSH__, пример: __SSH__,443,8443): " ports_csv
+          if [[ -z "$ports_csv" ]]; then
+            print_warn "Список портов не может быть пустым."
+            continue
+          fi
+          if validate_ports_csv "$ports_csv"; then
+            break
+          fi
+          print_warn "Некорректный список портов."
+        done
+        break
+        ;;
+      *)
+        print_warn "Введите 1, 2, 3 или 4."
+        ;;
+    esac
+  done
+
+  acl_add_entry "$entry_name" "$entry_ip" "$profile_name" "$ports_csv"
+}
+
 choose_access_mode() {
   echo
   echo "Выберите модель доступа по IP для SSH:"
@@ -707,33 +838,44 @@ choose_access_mode() {
     case "$choice" in
       1)
         ACCESS_MODE="all"
+        ALLOWED_IPS_CSV=""
         break
         ;;
       2)
         ACCESS_MODE="selected"
+        ACL_NAMES=()
+        ACL_IPS=()
+        ACL_PROFILES=()
+        ACL_PORTS=()
+
+        get_client_ip
+        acl_add_entry "ssh-client-auto" "$CLIENT_IP" "ssh-only" "$PROFILE_SSH_ONLY"
+
+        acl_render_table
+
         while true; do
-          read -r -p "Введите IP/CIDR через запятую (пример: 1.2.3.4,5.6.7.0/24): " ALLOWED_IPS_CSV
-          if [[ -z "$ALLOWED_IPS_CSV" ]]; then
-            print_warn "Список не может быть пустым для режима selected."
-            continue
-          fi
-
-          local valid=1
-          local item
-          IFS=',' read -r -a items <<< "$ALLOWED_IPS_CSV"
-          for item in "${items[@]}"; do
-            item="$(echo "$item" | xargs)"
-            if ! validate_ip_or_cidr "$item"; then
-              valid=0
-              print_warn "Некорректный IP/CIDR: $item"
+          local add_more
+          read -r -p "Добавить новый IP в ACL? [y/N]: " add_more
+          add_more="${add_more:-N}"
+          case "$add_more" in
+            y|Y|yes|YES)
+              acl_collect_entry_interactive
+              acl_render_table
+              ;;
+            n|N|no|NO)
               break
-            fi
-          done
-
-          if [[ "$valid" -eq 1 ]]; then
-            break
-          fi
+              ;;
+            *)
+              print_warn "Введите y или n."
+              ;;
+          esac
         done
+
+        if [[ "${#ACL_NAMES[@]}" -eq 0 ]]; then
+          handle_error "ACL пустой. Для режима selected нужен хотя бы один IP."
+        fi
+
+        ALLOWED_IPS_CSV="$(IFS=,; echo "${ACL_IPS[*]}")"
         break
         ;;
       *)
@@ -880,6 +1022,23 @@ safe_delete_user() {
   fi
 
   run_cmd "userdel -r \"${user}\"" "$action_label"
+}
+
+resolve_ports_csv_for_runtime() {
+  local csv="$1"
+  local p
+  local out=()
+  IFS=',' read -r -a parts <<< "$csv"
+  for p in "${parts[@]}"; do
+    p="$(echo "$p" | xargs)"
+    if [[ "$p" == "__SSH__" ]]; then
+      out+=("$SSH_PORT")
+    else
+      out+=("$p")
+    fi
+  done
+  IFS=','
+  echo "${out[*]}"
 }
 
 prune_old_users() {
@@ -1046,14 +1205,28 @@ step_5_configure_ufw() {
   run_cmd "ufw default deny incoming" "UFW: deny incoming"
   run_cmd "ufw default allow outgoing" "UFW: allow outgoing"
 
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    run_cmd "ufw --force reset" "Сброс UFW для чистого применения актуальных правил"
+    run_cmd "ufw default deny incoming" "UFW: deny incoming (после reset)"
+    run_cmd "ufw default allow outgoing" "UFW: allow outgoing (после reset)"
+  fi
+
   if [[ "$ACCESS_MODE" == "all" ]]; then
     run_cmd "ufw allow ${SSH_PORT}/tcp" "Разрешение SSH с любых IP"
   else
-    local ip
-    IFS=',' read -r -a ips <<< "$ALLOWED_IPS_CSV"
-    for ip in "${ips[@]}"; do
-      ip="$(echo "$ip" | xargs)"
-      run_cmd "ufw allow from ${ip} to any port ${SSH_PORT} proto tcp" "Разрешение SSH только с ${ip}"
+    local i ip name ports_csv resolved_ports p
+    for ((i=0; i<${#ACL_IPS[@]}; i++)); do
+      ip="${ACL_IPS[$i]}"
+      name="${ACL_NAMES[$i]}"
+      ports_csv="${ACL_PORTS[$i]}"
+      resolved_ports="$(resolve_ports_csv_for_runtime "$ports_csv")"
+
+      IFS=',' read -r -a ports <<< "$resolved_ports"
+      for p in "${ports[@]}"; do
+        p="$(echo "$p" | xargs)"
+        validate_port "$p" || continue
+        run_cmd "ufw allow from ${ip} to any port ${p} proto tcp" "ACL ${name}: разрешение ${ip} -> tcp/${p}"
+      done
     done
   fi
 
@@ -1256,7 +1429,7 @@ step_9_final_report() {
   if [[ "$ACCESS_MODE" == "all" ]]; then
     access_human="ALL"
   else
-    access_human="$ALLOWED_IPS_CSV"
+    access_human="SELECTED (${#ACL_IPS[@]} entries)"
   fi
 
   echo
@@ -1273,6 +1446,20 @@ step_9_final_report() {
   printf "║ Auto-maint log: %-51s ║\n" "$MAINT_LOG_FILE"
   printf "║ Auto-maint timer: %-48s ║\n" "vps-hardening-maintenance.timer"
   echo "╚════════════════════════════════════════════════════════════════════╝"
+
+  if [[ "$ACCESS_MODE" == "selected" ]]; then
+    echo
+    echo "ACL таблица (актуальные порты):"
+    echo "┌────┬────────────────────┬──────────────────────┬────────────────┬─────────────────┐"
+    echo "│ #  │ Name               │ IP/CIDR              │ Profile        │ Allow ports     │"
+    echo "├────┼────────────────────┼──────────────────────┼────────────────┼─────────────────┤"
+    local i resolved
+    for ((i=0; i<${#ACL_IPS[@]}; i++)); do
+      resolved="$(resolve_ports_csv_for_runtime "${ACL_PORTS[$i]}")"
+      printf "│ %-2s │ %-18s │ %-20s │ %-14s │ %-15s │\n" "$((i+1))" "${ACL_NAMES[$i]}" "${ACL_IPS[$i]}" "${ACL_PROFILES[$i]}" "$resolved"
+    done
+    echo "└────┴────────────────────┴──────────────────────┴────────────────┴─────────────────┘"
+  fi
 
   echo
   echo "---------------------- SSH PRIVATE KEY ----------------------"
