@@ -1,11 +1,11 @@
 #!/bin/bash
 # VPS Hardening Script
-# Version: 1.3.3
+# Version: 1.3.4
 # Compatibility: Ubuntu 20.04+ / Debian 11+
 
 set -euo pipefail
 
-VERSION="1.3.3"
+VERSION="1.3.4"
 LOG_FILE="/var/log/vps_hardening.log"
 DRY_RUN=0
 ROLLBACK=0
@@ -75,6 +75,34 @@ print_ok() { echo -e "${C_GREEN}[OK]${C_RESET} $*"; }
 print_warn() { echo -e "${C_YELLOW}[WARN]${C_RESET} $*"; }
 print_error() { echo -e "${C_RED}[ERROR]${C_RESET} $*" >&2; }
 
+fit_cell() {
+  local width="$1"
+  local text="$2"
+  local max=$((width-1))
+
+  if (( ${#text} > width )); then
+    text="${text:0:max}~"
+  fi
+
+  printf "%-${width}s" "$text"
+}
+
+show_random_easter_egg() {
+  local idx=$(( (10#$(date +%S)) % 3 ))
+  case "$idx" in
+    0) print_info "Пасхалка #1: Ctrl+R в shell иногда ускоряет hardening больше, чем кофе." ;;
+    1) print_info "Пасхалка #2: хороший backup - это когда rollback нужен, но не страшен." ;;
+    2) print_info "Пасхалка #3: 22-й порт не злой, просто слишком популярный." ;;
+  esac
+}
+
+show_all_easter_eggs() {
+  echo "Пасхалки от скрипта:"
+  echo "  1) Ctrl+R в shell иногда ускоряет hardening больше, чем кофе."
+  echo "  2) хороший backup - это когда rollback нужен, но не страшен."
+  echo "  3) 22-й порт не злой, просто слишком популярный."
+}
+
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
 log() {
@@ -96,7 +124,7 @@ show_help() {
 Опции:
   --dry-run   Симуляция без реальных изменений.
   --rollback  Откат последнего применения hardening.
-  --uninstall Полное удаление hardening-артефактов и пакетов fail2ban/ufw.
+  --uninstall Удаление hardening-артефактов; пакеты fail2ban/ufw удаляются только если установлены скриптом.
   --help      Показать справку.
 
 Что делает скрипт:
@@ -177,10 +205,11 @@ handle_error() {
 show_banner() {
   cat <<'EOF'
 ╔══════════════════════════════════════════════════════════╗
-║            VPS HARDENING SCRIPT v1.3.3                  ║
+║            VPS HARDENING SCRIPT v1.3.4                  ║
 ║     Автоматическая защита VPS (Ubuntu/Debian)           ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
+  show_random_easter_egg
 }
 
 save_runtime_state() {
@@ -1373,7 +1402,7 @@ rebuild_acl_apply_pairs() {
   fi
 
   local i src port key
-  local seen=()
+  declare -A seen=()
 
   for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
     src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
@@ -1383,11 +1412,11 @@ rebuild_acl_apply_pairs() {
     [[ "$src" == "any" ]] || validate_ip_or_cidr "$src" || continue
 
     key="${src}|${port}"
-    if [[ ",${seen[*]}," == *",${key},"* ]]; then
+    if [[ -n "${seen[$key]:-}" ]]; then
       continue
     fi
 
-    seen+=("$key")
+    seen["$key"]=1
     ACL_APPLY_SOURCES+=("$src")
     ACL_APPLY_PORTS+=("$port")
   done
@@ -1409,7 +1438,12 @@ render_fw_table() {
     for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
       src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
       port="$(resolve_fw_port_for_rule "${FW_RULE_NAMES[$i]}" "${FW_RULE_PORTS[$i]}")"
-      printf "║ %-2s ║ %-18s ║ %-20s ║ %-10s ║ %-25s ║\n" "$((i+1))" "${FW_RULE_NAMES[$i]}" "$src" "$port" "${FW_RULE_NOTES[$i]}"
+      printf "║ %s ║ %s ║ %s ║ %s ║ %s ║\n" \
+        "$(fit_cell 2 "$((i+1))")" \
+        "$(fit_cell 18 "${FW_RULE_NAMES[$i]}")" \
+        "$(fit_cell 20 "$src")" \
+        "$(fit_cell 10 "$port")" \
+        "$(fit_cell 25 "${FW_RULE_NOTES[$i]}")"
     done
   fi
   echo "╚════╩════════════════════╩══════════════════════╩════════════╩═══════════════════════════╝"
@@ -2281,7 +2315,12 @@ step_9_final_report() {
     for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
       src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
       port="$(resolve_fw_port_for_rule "${FW_RULE_NAMES[$i]}" "${FW_RULE_PORTS[$i]}")"
-      printf "│ %-2s │ %-18s │ %-20s │ %-10s │ %-17s │\n" "$((i+1))" "${FW_RULE_NAMES[$i]}" "$src" "$port" "${FW_RULE_NOTES[$i]}"
+      printf "│ %s │ %s │ %s │ %s │ %s │\n" \
+        "$(fit_cell 2 "$((i+1))")" \
+        "$(fit_cell 18 "${FW_RULE_NAMES[$i]}")" \
+        "$(fit_cell 20 "$src")" \
+        "$(fit_cell 10 "$port")" \
+        "$(fit_cell 17 "${FW_RULE_NOTES[$i]}")"
     done
     echo "└────┴────────────────────┴──────────────────────┴────────────┴───────────────────┘"
   fi
@@ -2306,6 +2345,9 @@ step_9_final_report() {
   echo "Команда полного удаления hardening (включая fail2ban/ufw):"
   echo "  sudo bash vps_hardening.sh --uninstall"
   echo "  curl -fsSL ${DEFAULT_SELF_UPDATE_URL} | sudo bash -s -- --uninstall"
+
+  echo
+  show_all_easter_eggs
 
   echo
   print_warn "Не закрывайте текущую сессию, пока не проверите вход новой командой."
