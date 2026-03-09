@@ -105,13 +105,33 @@ EOF
 ask_confirm() {
   local prompt="$1"
   local answer
-  read -r -p "$prompt [Y/n]: " answer
+
+  if ! read_from_tty answer "$prompt [Y/n]: "; then
+    print_error "Не удалось получить интерактивный ввод (TTY недоступен)."
+    return 1
+  fi
+
   answer="${answer:-Y}"
   case "$answer" in
     Y|y|yes|YES) return 0 ;;
     N|n|no|NO) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+read_from_tty() {
+  local __var_name="$1"
+  local __prompt="$2"
+  local __value=""
+
+  if [[ -r /dev/tty ]]; then
+    read -r -p "$__prompt" __value < /dev/tty || return 1
+  else
+    read -r -p "$__prompt" __value || return 1
+  fi
+
+  printf -v "$__var_name" '%s' "$__value"
+  return 0
 }
 
 handle_error() {
@@ -783,7 +803,7 @@ add_profile_marzban_host() {
 add_profile_marzban_node() {
   local host_ip
   while true; do
-    read -r -p "Введите IP/CIDR Marzban-host: " host_ip
+    read_from_tty host_ip "Введите IP/CIDR Marzban-host: " || return 1
     if validate_ip_or_cidr "$host_ip"; then
       break
     fi
@@ -800,7 +820,7 @@ add_profile_marzban_node() {
 add_custom_rule() {
   local name src_choice src port_choice port
   while true; do
-    read -r -p "Имя custom-правила: " name
+    read_from_tty name "Имя custom-правила: " || return 1
     name="${name:-custom-$((${#FW_RULE_NAMES[@]}+1))}"
     if [[ "$name" =~ ^[A-Za-z0-9._:-]+$ ]]; then
       break
@@ -813,13 +833,13 @@ add_custom_rule() {
   echo "  2) current-ssh-ip"
   echo "  3) specific IP/CIDR"
   while true; do
-    read -r -p "Ваш выбор [1/2/3]: " src_choice
+    read_from_tty src_choice "Ваш выбор [1/2/3]: " || return 1
     case "$src_choice" in
       1) src="any"; break ;;
       2) src="__SSH_CLIENT_IP__"; break ;;
       3)
         while true; do
-          read -r -p "Введите IP/CIDR: " src
+          read_from_tty src "Введите IP/CIDR: " || return 1
           if validate_ip_or_cidr "$src"; then
             break
           fi
@@ -835,12 +855,12 @@ add_custom_rule() {
   echo "  1) __SSH__ (автоподстановка текущего SSH-порта)"
   echo "  2) custom numeric"
   while true; do
-    read -r -p "Ваш выбор [1/2]: " port_choice
+    read_from_tty port_choice "Ваш выбор [1/2]: " || return 1
     case "$port_choice" in
       1) port="__SSH__"; break ;;
       2)
         while true; do
-          read -r -p "Введите TCP порт: " port
+          read_from_tty port "Введите TCP порт: " || return 1
           if validate_port "$port"; then
             break
           fi
@@ -863,7 +883,7 @@ choose_access_mode() {
 
   local choice
   while true; do
-    read -r -p "Ваш выбор [1/2]: " choice
+    read_from_tty choice "Ваш выбор [1/2]: " || return 1
     case "$choice" in
       1)
         ACCESS_MODE="all"
@@ -889,7 +909,7 @@ choose_access_mode() {
           echo "  4) Завершить"
 
           local item
-          read -r -p "Ваш выбор [1/2/3/4]: " item
+          read_from_tty item "Ваш выбор [1/2/3/4]: " || return 1
           case "$item" in
             1)
               add_profile_marzban_host
@@ -913,7 +933,7 @@ choose_access_mode() {
           esac
 
           local add_more
-          read -r -p "Добавить еще правило/IP? [Y/n]: " add_more
+          read_from_tty add_more "Добавить еще правило/IP? [Y/n]: " || return 1
           add_more="${add_more:-Y}"
           case "$add_more" in
             n|N|no|NO)
@@ -1105,7 +1125,7 @@ step_2_user_management() {
   print_step_header "2" "Создание пользователя" "Создаем отдельного sudo-пользователя и удаляем лишние пользовательские аккаунты."
 
   while true; do
-    read -r -p "Введите имя нового пользователя: " NEW_USER
+    read_from_tty NEW_USER "Введите имя нового пользователя: " || return 1
     if validate_username "$NEW_USER"; then
       break
     fi
@@ -1187,7 +1207,7 @@ step_4_secure_ssh_access() {
 
   local input_port
   while true; do
-    read -r -p "Введите новый SSH-порт [1024-65535, Enter = 2222]: " input_port
+    read_from_tty input_port "Введите новый SSH-порт [1024-65535, Enter = 2222]: " || return 1
     input_port="${input_port:-2222}"
     if validate_port "$input_port"; then
       SSH_PORT="$input_port"
