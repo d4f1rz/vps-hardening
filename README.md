@@ -104,7 +104,8 @@ curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_har
 
 - SSH auth переводится в режим входа по паролю (`PasswordAuthentication yes`)
 - key-based строки в `sshd_config` комментируются (`PubkeyAuthentication`, `AuthorizedKeysFile`)
-- UFW не отключается, выполняется `ufw reload`
+- выполняется `ufw reload`, затем `ufw disable`
+- после изменений `sshd_config` выполняется `systemctl restart sshd` (с fallback на `ssh`)
 
 ### Повторный запуск (reinstall с нуля)
 
@@ -271,6 +272,8 @@ ssh <user>@<IP> -p <port>
 - Для `all` открывается только SSH-порт, выбранный на шаге 4.
 - Для `selected` UFW строится строго по таблице ACL из шага `0.1`: берутся только `source` и `port` каждого правила.
 - Для ACL-правил вида `*:ssh` и/или `__SSH__` используется актуальный SSH-порт из шага 4.
+- Внутри скрипта формируется отдельный apply-список пар `source+port`; именно он используется для применения UFW.
+- На шаге 4 при смене SSH-порта пары с `__SSH__`/`*:ssh` автоматически пересчитываются на новый порт.
 - После `ufw enable` выполняется проверка, что все правила из шага `0.1` применились; недостающие правила добавляются повторно.
 - Перед применением делается `ufw reset`, чтобы старые порты не оставались после смены SSH-порта.
 

@@ -50,6 +50,10 @@ declare -a FW_RULE_SOURCES=()  # any | __SSH_CLIENT_IP__ | <IP/CIDR>
 declare -a FW_RULE_PORTS=()    # __SSH__ | <port>
 declare -a FW_RULE_NOTES=()
 
+# Нормализованный список source+port для применения в UFW (строится из ACL шага 0.1).
+declare -a ACL_APPLY_SOURCES=()
+declare -a ACL_APPLY_PORTS=()
+
 SSH_PRIVATE_KEY_CONTENT=""
 SSH_PUBLIC_KEY_CONTENT=""
 SSH_KEY_PASSPHRASE=""
@@ -404,6 +408,7 @@ rollback_last() {
   run_cmd "systemctl daemon-reload" "Перезагрузка systemd unit-файлов после отката"
 
   run_cmd "ufw --force reload" "Перезагрузка UFW"
+  run_cmd "ufw --force disable" "Отключение UFW после reload по политике rollback"
 
   rollback_adjust_sshd_auth
   local sshd_bin
@@ -411,6 +416,7 @@ rollback_last() {
   if [[ -n "$sshd_bin" ]]; then
     run_cmd "\"${sshd_bin}\" -t" "Проверка sshd_config после rollback-настроек auth"
   fi
+  run_cmd "systemctl restart sshd || systemctl restart ssh" "Перезапуск sshd после изменений sshd_config"
 
   local restore_user
   local list_file="${BACKUP_DIR}/deleted_users/list.txt"
@@ -473,12 +479,6 @@ rollback_last() {
     if id "$NEW_USER" >/dev/null 2>&1; then
       safe_delete_user "$NEW_USER" "Удаление пользователя hardening: ${NEW_USER}"
     fi
-  fi
-
-  if [[ -n "${SSH_SERVICE:-}" ]]; then
-    run_cmd "systemctl restart ${SSH_SERVICE}" "Перезапуск SSH после отката"
-  else
-    run_cmd "systemctl restart sshd || systemctl restart ssh" "Перезапуск SSH после отката"
   fi
 
   run_cmd "systemctl restart fail2ban || true" "Перезапуск Fail2ban после отката"
@@ -662,9 +662,28 @@ print_ufw_rules_summary() {
     return 0
   fi
 
-  rules="$(ufw status numbered 2>/dev/null | sed -n 's/^\[[[:space:]]*[0-9]\+\][[:space:]]*//p')"
-
   echo "Разрешенные порты/правила UFW:"
+  if [[ "$ACCESS_MODE" == "selected" ]]; then
+    local i src_label
+    if [[ "${#ACL_APPLY_PORTS[@]}" -eq 0 ]]; then
+      echo "  (нет ACL-пар source+port для применения)"
+      return 0
+    fi
+
+    for ((i=0; i<${#ACL_APPLY_PORTS[@]}; i++)); do
+      if [[ "${ACL_APPLY_SOURCES[$i]}" == "any" ]]; then
+        src_label="Anywhere"
+      elif [[ "${ACL_APPLY_SOURCES[$i]}" == "$CLIENT_IP" ]]; then
+        src_label="SSH Connected IP"
+      else
+        src_label="${ACL_APPLY_SOURCES[$i]}"
+      fi
+      printf "  - %-26s %-11s %s\n" "${ACL_APPLY_PORTS[$i]}/tcp" "ALLOW" "$src_label"
+    done
+    return 0
+  fi
+
+  rules="$(ufw status numbered 2>/dev/null | sed -n 's/^\[[[:space:]]*[0-9]\+\][[:space:]]*//p')"
   if [[ -z "$rules" ]]; then
     echo "  (нет явных allow-правил)"
   else
@@ -1319,24 +1338,54 @@ rollback_adjust_sshd_auth() {
 }
 
 rebuild_allowed_ips_csv() {
-  local i src resolved
+  local i src
   local unique=()
   ALLOWED_IPS_CSV=""
 
-  for ((i=0; i<${#FW_RULE_SOURCES[@]}; i++)); do
-    src="${FW_RULE_SOURCES[$i]}"
-    resolved="$(resolve_fw_source "$src")"
-    if [[ "$resolved" == "any" ]]; then
+  for ((i=0; i<${#ACL_APPLY_SOURCES[@]}; i++)); do
+    src="${ACL_APPLY_SOURCES[$i]}"
+    if [[ "$src" == "any" ]]; then
       continue
     fi
-    if [[ ",${unique[*]}," != *",${resolved},"* ]]; then
-      unique+=("$resolved")
+    if [[ ",${unique[*]}," != *",${src},"* ]]; then
+      unique+=("$src")
     fi
   done
 
   if [[ "${#unique[@]}" -gt 0 ]]; then
     ALLOWED_IPS_CSV="$(IFS=,; echo "${unique[*]}")"
   fi
+}
+
+rebuild_acl_apply_pairs() {
+  ACL_APPLY_SOURCES=()
+  ACL_APPLY_PORTS=()
+
+  if [[ "$ACCESS_MODE" != "selected" ]]; then
+    return 0
+  fi
+
+  local i src port key
+  local seen=()
+
+  for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+    src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
+    port="$(resolve_fw_port_for_rule "${FW_RULE_NAMES[$i]}" "${FW_RULE_PORTS[$i]}")"
+
+    validate_port "$port" || continue
+    [[ "$src" == "any" ]] || validate_ip_or_cidr "$src" || continue
+
+    key="${src}|${port}"
+    if [[ ",${seen[*]}," == *",${key},"* ]]; then
+      continue
+    fi
+
+    seen+=("$key")
+    ACL_APPLY_SOURCES+=("$src")
+    ACL_APPLY_PORTS+=("$port")
+  done
+
+  log "ACL apply list rebuilt: pairs=${#ACL_APPLY_PORTS[@]}"
 }
 
 render_fw_table() {
@@ -1563,6 +1612,7 @@ choose_access_mode() {
           esac
         done
 
+        rebuild_acl_apply_pairs
         rebuild_allowed_ips_csv
         break
         ;;
@@ -1861,6 +1911,10 @@ step_4_secure_ssh_access() {
   set_sshd_option "MaxAuthTries" "3"
   set_sshd_option "LoginGraceTime" "20"
 
+  # После смены SSH порта пересобираем apply-список ACL, чтобы __SSH__ был актуальным.
+  rebuild_acl_apply_pairs
+  rebuild_allowed_ips_csv
+
   save_runtime_state
 
   local sshd_bin
@@ -1904,17 +1958,18 @@ step_5_configure_ufw() {
   if [[ "$ACCESS_MODE" == "all" ]]; then
     run_cmd "ufw allow ${SSH_PORT}/tcp" "Разрешение SSH с любых IP"
   else
-    local i src port name
-    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
-      name="${FW_RULE_NAMES[$i]}"
-      src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
-      port="$(resolve_fw_port_for_rule "${name}" "${FW_RULE_PORTS[$i]}")"
+    rebuild_acl_apply_pairs
+
+    local i src port
+    for ((i=0; i<${#ACL_APPLY_PORTS[@]}; i++)); do
+      src="${ACL_APPLY_SOURCES[$i]}"
+      port="${ACL_APPLY_PORTS[$i]}"
 
       validate_port "$port" || continue
       if [[ "$src" == "any" ]]; then
-        run_cmd "ufw allow ${port}/tcp" "ACL ${name}: allow any -> tcp/${port}"
+        run_cmd "ufw allow ${port}/tcp" "ACL apply: allow any -> tcp/${port}"
       else
-        run_cmd "ufw allow from ${src} to any port ${port} proto tcp" "ACL ${name}: allow ${src} -> tcp/${port}"
+        run_cmd "ufw allow from ${src} to any port ${port} proto tcp" "ACL apply: allow ${src} -> tcp/${port}"
       fi
     done
   fi
@@ -1936,22 +1991,21 @@ step_5_configure_ufw() {
     local ufw_dump
     ufw_dump="$(ufw status 2>/dev/null || true)"
 
-    local i src port name
-    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
-      name="${FW_RULE_NAMES[$i]}"
-      src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
-      port="$(resolve_fw_port_for_rule "${name}" "${FW_RULE_PORTS[$i]}")"
+    local i src port
+    for ((i=0; i<${#ACL_APPLY_PORTS[@]}; i++)); do
+      src="${ACL_APPLY_SOURCES[$i]}"
+      port="${ACL_APPLY_PORTS[$i]}"
 
       validate_port "$port" || continue
       if [[ "$src" == "any" ]]; then
         if ! echo "$ufw_dump" | grep -Eq "${port}/tcp"; then
-          print_warn "ACL '${name}' не найден в UFW после применения, пробуем добавить повторно."
-          run_cmd "ufw allow ${port}/tcp" "Повторное применение ACL ${name}"
+          print_warn "ACL pair any:${port} не найден в UFW после применения, пробуем добавить повторно."
+          run_cmd "ufw allow ${port}/tcp" "Повторное применение ACL any:${port}"
         fi
       else
         if ! echo "$ufw_dump" | grep -Eq "${port}/tcp" || ! echo "$ufw_dump" | grep -Fq "$src"; then
-          print_warn "ACL '${name}' не найден в UFW после применения, пробуем добавить повторно."
-          run_cmd "ufw allow from ${src} to any port ${port} proto tcp" "Повторное применение ACL ${name}"
+          print_warn "ACL pair ${src}:${port} не найден в UFW после применения, пробуем добавить повторно."
+          run_cmd "ufw allow from ${src} to any port ${port} proto tcp" "Повторное применение ACL ${src}:${port}"
         fi
       fi
     done
