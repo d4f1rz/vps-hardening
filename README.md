@@ -14,14 +14,6 @@ curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_har
 curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh | sudo bash -s -- --rollback
 ```
 
-## ⚡ Быстрый старт (3 команды)
-
-```bash
-wget -O vps_hardening.sh https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh
-chmod +x vps_hardening.sh
-sudo bash vps_hardening.sh
-```
-
 ## 📋 Что делает скрипт
 
 | Шаг | Описание | Интерактивный? |
