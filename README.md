@@ -152,7 +152,9 @@ curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_har
   - `1) Marzban-host`
   - `2) Marzban-node`
   - `3) Custom rule`
+  - `0) Назад`
 - в пунктах `Изменить`/`Удалить` сначала выводится список `1) name, 2) name, ...`, затем выбор нужного правила
+- в подменю также есть `0) Назад` для безопасного возврата при мисс-клике
 - ACL сохраняется в `/etc/vps-hardening-acl.json`
 - при следующем запуске можно загрузить сохраненный ACL автоматически
 

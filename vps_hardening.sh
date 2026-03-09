@@ -957,9 +957,13 @@ edit_fw_rule_interactive() {
   for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
     printf "  %s) %s\n" "$((i+1))" "${FW_RULE_NAMES[$i]}"
   done
+  echo "  0) Назад"
 
   local idx_input idx edit_choice new_name src_choice new_src port_choice new_port new_note
-  read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}]: " || return 1
+  read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}/0]: " || return 1
+  if [[ "$idx_input" == "0" ]]; then
+    return 0
+  fi
   [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
   idx=$((idx_input-1))
   if (( idx < 0 || idx >= ${#FW_RULE_NAMES[@]} )); then
@@ -974,11 +978,13 @@ edit_fw_rule_interactive() {
   echo "  3) Port"
   echo "  4) Note"
   echo "  5) Всё сразу"
+  echo "  0) Назад"
   while true; do
-    read_from_tty edit_choice "Ваш выбор [1/2/3/4/5]: " || return 1
+    read_from_tty edit_choice "Ваш выбор [1/2/3/4/5/0]: " || return 1
     case "$edit_choice" in
+      0) return 0 ;;
       1|2|3|4|5) break ;;
-      *) print_warn "Введите 1, 2, 3, 4 или 5." ;;
+      *) print_warn "Введите 1, 2, 3, 4, 5 или 0." ;;
     esac
   done
 
@@ -998,9 +1004,11 @@ edit_fw_rule_interactive() {
     echo "  2) all"
     echo "  3) current-ssh-ip"
     echo "  4) specific IP/CIDR"
+    echo "  0) Назад"
     while true; do
-      read_from_tty src_choice "Ваш выбор [1/2/3/4]: " || return 1
+      read_from_tty src_choice "Ваш выбор [1/2/3/4/0]: " || return 1
       case "$src_choice" in
+        0) return 0 ;;
         1) new_src="${FW_RULE_SOURCES[$idx]}"; break ;;
         2) new_src="any"; break ;;
         3) new_src="__SSH_CLIENT_IP__"; break ;;
@@ -1014,7 +1022,7 @@ edit_fw_rule_interactive() {
           done
           break
           ;;
-        *) print_warn "Введите 1, 2, 3 или 4." ;;
+        *) print_warn "Введите 1, 2, 3, 4 или 0." ;;
       esac
     done
   fi
@@ -1024,9 +1032,11 @@ edit_fw_rule_interactive() {
     echo "  1) оставить как есть (${FW_RULE_PORTS[$idx]})"
     echo "  2) __SSH__"
     echo "  3) custom numeric"
+    echo "  0) Назад"
     while true; do
-      read_from_tty port_choice "Ваш выбор [1/2/3]: " || return 1
+      read_from_tty port_choice "Ваш выбор [1/2/3/0]: " || return 1
       case "$port_choice" in
+        0) return 0 ;;
         1) new_port="${FW_RULE_PORTS[$idx]}"; break ;;
         2) new_port="__SSH__"; break ;;
         3)
@@ -1039,7 +1049,7 @@ edit_fw_rule_interactive() {
           done
           break
           ;;
-        *) print_warn "Введите 1, 2 или 3." ;;
+        *) print_warn "Введите 1, 2, 3 или 0." ;;
       esac
     done
   fi
@@ -1069,9 +1079,13 @@ delete_fw_rule_interactive() {
   for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
     printf "  %s) %s\n" "$((i+1))" "${FW_RULE_NAMES[$i]}"
   done
+  echo "  0) Назад"
 
   local idx_input idx confirm
-  read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}]: " || return 1
+  read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}/0]: " || return 1
+  if [[ "$idx_input" == "0" ]]; then
+    return 0
+  fi
   [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
   idx=$((idx_input-1))
   if (( idx < 0 || idx >= ${#FW_RULE_NAMES[@]} )); then
@@ -1171,9 +1185,10 @@ add_rule_menu() {
   echo "  1) Marzban-host"
   echo "  2) Marzban-node"
   echo "  3) Custom rule"
+  echo "  0) Назад"
 
   while true; do
-    read_from_tty item "Ваш выбор [1/2/3]: " || return 1
+    read_from_tty item "Ваш выбор [1/2/3/0]: " || return 1
     case "$item" in
       1)
         add_profile_marzban_host
@@ -1190,8 +1205,11 @@ add_rule_menu() {
         save_acl_to_disk
         return 0
         ;;
+      0)
+        return 0
+        ;;
       *)
-        print_warn "Введите 1, 2 или 3."
+        print_warn "Введите 1, 2, 3 или 0."
         ;;
     esac
   done
@@ -1235,9 +1253,11 @@ add_custom_rule() {
   echo "  1) all"
   echo "  2) current-ssh-ip"
   echo "  3) specific IP/CIDR"
+  echo "  0) Назад"
   while true; do
-    read_from_tty src_choice "Ваш выбор [1/2/3]: " || return 1
+    read_from_tty src_choice "Ваш выбор [1/2/3/0]: " || return 1
     case "$src_choice" in
+      0) return 0 ;;
       1) src="any"; break ;;
       2) src="__SSH_CLIENT_IP__"; break ;;
       3)
@@ -1250,16 +1270,18 @@ add_custom_rule() {
         done
         break
         ;;
-      *) print_warn "Введите 1, 2 или 3." ;;
+      *) print_warn "Введите 1, 2, 3 или 0." ;;
     esac
   done
 
   echo "Порт правила:"
   echo "  1) __SSH__ (автоподстановка текущего SSH-порта)"
   echo "  2) custom numeric"
+  echo "  0) Назад"
   while true; do
-    read_from_tty port_choice "Ваш выбор [1/2]: " || return 1
+    read_from_tty port_choice "Ваш выбор [1/2/0]: " || return 1
     case "$port_choice" in
+      0) return 0 ;;
       1) port="__SSH__"; break ;;
       2)
         while true; do
@@ -1271,7 +1293,7 @@ add_custom_rule() {
         done
         break
         ;;
-      *) print_warn "Введите 1 или 2." ;;
+      *) print_warn "Введите 1, 2 или 0." ;;
     esac
   done
 
