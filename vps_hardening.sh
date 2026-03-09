@@ -21,6 +21,7 @@ MAINT_LOG_FILE="/var/log/vps_hardening_maintenance.log"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/vps-hardening-maintenance.service"
 SYSTEMD_TIMER_FILE="/etc/systemd/system/vps-hardening-maintenance.timer"
 DEFAULT_SELF_UPDATE_URL="https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh"
+ACL_STORE_JSON="/etc/vps-hardening-acl.json"
 DEFERRED_DELETE_DIR="/var/lib/vps-hardening"
 DEFERRED_DELETE_LIST="${DEFERRED_DELETE_DIR}/deferred_delete_users.list"
 DEFERRED_DELETE_SCRIPT="/usr/local/sbin/vps_hardening_deferred_delete.sh"
@@ -235,6 +236,10 @@ init_backup_snapshot() {
     cp "$SYSTEMD_TIMER_FILE" "${BACKUP_DIR}/files/vps-hardening-maintenance.timer.before"
   fi
 
+  if [[ -f "$ACL_STORE_JSON" ]]; then
+    cp "$ACL_STORE_JSON" "${BACKUP_DIR}/files/vps-hardening-acl.json.before"
+  fi
+
   ufw status verbose > "${BACKUP_DIR}/files/ufw_status.before" 2>/dev/null || true
 
   save_runtime_state
@@ -349,6 +354,14 @@ rollback_last() {
     fi
   fi
 
+  if [[ -f "${BACKUP_DIR}/files/vps-hardening-acl.json.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/vps-hardening-acl.json.before\" \"${ACL_STORE_JSON}\"" "Восстановление ACL-файла"
+  else
+    if [[ -f "$ACL_STORE_JSON" ]]; then
+      run_cmd "rm -f \"${ACL_STORE_JSON}\"" "Удаление ACL-файла"
+    fi
+  fi
+
   run_cmd "systemctl daemon-reload" "Перезагрузка systemd unit-файлов после отката"
 
   run_cmd "ufw --force reload" "Перезагрузка UFW"
@@ -456,6 +469,7 @@ reset_to_legacy_baseline() {
   run_cmd "systemctl disable --now vps-hardening-maintenance.timer || true" "Отключение timer auto-maintenance"
   run_cmd "systemctl disable --now vps-hardening-deferred-delete.timer || true" "Отключение timer отложенного удаления"
   run_cmd "rm -f \"${SYSTEMD_TIMER_FILE}\" \"${SYSTEMD_SERVICE_FILE}\" \"${MAINT_SCRIPT_PATH}\" \"${AUTOMATION_CONFIG_FILE}\"" "Удаление automation-файлов"
+  run_cmd "rm -f \"${ACL_STORE_JSON}\"" "Удаление сохраненного ACL-файла"
   run_cmd "rm -f \"${DEFERRED_DELETE_TIMER}\" \"${DEFERRED_DELETE_SERVICE}\" \"${DEFERRED_DELETE_SCRIPT}\" \"${DEFERRED_DELETE_LIST}\"" "Удаление файлов отложенного удаления"
   run_cmd "systemctl daemon-reload" "Обновление systemd после удаления automation"
 
@@ -838,6 +852,192 @@ fw_add_rule() {
   FW_RULE_NOTES+=("$note")
 }
 
+fw_clear_rules() {
+  FW_RULE_NAMES=()
+  FW_RULE_SOURCES=()
+  FW_RULE_PORTS=()
+  FW_RULE_NOTES=()
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  echo "$s"
+}
+
+json_unescape() {
+  local s="$1"
+  s="${s//\\\"/\"}"
+  s="${s//\\\\/\\}"
+  echo "$s"
+}
+
+save_acl_to_disk() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
+
+  local tmp="/tmp/vps-hardening-acl.json.$$"
+  {
+    echo "{"
+    echo "  \"version\": 1,"
+    echo "  \"mode\": \"selected\","
+    echo "  \"rules\": ["
+    local i comma name src port note
+    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+      name="$(json_escape "${FW_RULE_NAMES[$i]}")"
+      src="$(json_escape "${FW_RULE_SOURCES[$i]}")"
+      port="$(json_escape "${FW_RULE_PORTS[$i]}")"
+      note="$(json_escape "${FW_RULE_NOTES[$i]}")"
+      comma=","
+      if [[ "$i" -eq $((${#FW_RULE_NAMES[@]}-1)) ]]; then
+        comma=""
+      fi
+      echo "    {\"name\":\"${name}\",\"source\":\"${src}\",\"port\":\"${port}\",\"note\":\"${note}\"}${comma}"
+    done
+    echo "  ]"
+    echo "}"
+  } > "$tmp"
+
+  mv "$tmp" "$ACL_STORE_JSON"
+  chmod 600 "$ACL_STORE_JSON"
+  log "ACL saved: $ACL_STORE_JSON"
+}
+
+load_acl_from_disk() {
+  if [[ ! -f "$ACL_STORE_JSON" ]]; then
+    return 1
+  fi
+
+  fw_clear_rules
+  while IFS=$'\t' read -r name src port note; do
+    name="$(json_unescape "$name")"
+    src="$(json_unescape "$src")"
+    port="$(json_unescape "$port")"
+    note="$(json_unescape "$note")"
+    fw_add_rule "$name" "$src" "$port" "$note"
+  done < <(sed -n 's/^[[:space:]]*{\"name\":\"\([^\"]*\)\",\"source\":\"\([^\"]*\)\",\"port\":\"\([^\"]*\)\",\"note\":\"\([^\"]*\)\"}[[:space:]]*,\{0,1\}[[:space:]]*$/\1\t\2\t\3\t\4/p' "$ACL_STORE_JSON")
+
+  log "ACL loaded: $ACL_STORE_JSON, rules=${#FW_RULE_NAMES[@]}"
+  return 0
+}
+
+fw_delete_rule_by_index() {
+  local idx="$1"
+  unset 'FW_RULE_NAMES[idx]'
+  unset 'FW_RULE_SOURCES[idx]'
+  unset 'FW_RULE_PORTS[idx]'
+  unset 'FW_RULE_NOTES[idx]'
+  FW_RULE_NAMES=("${FW_RULE_NAMES[@]}")
+  FW_RULE_SOURCES=("${FW_RULE_SOURCES[@]}")
+  FW_RULE_PORTS=("${FW_RULE_PORTS[@]}")
+  FW_RULE_NOTES=("${FW_RULE_NOTES[@]}")
+}
+
+edit_fw_rule_interactive() {
+  if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
+    print_warn "Нет правил для изменения."
+    return 0
+  fi
+
+  local idx_input idx new_name src_choice new_src port_choice new_port new_note
+  read_from_tty idx_input "Введите номер правила для изменения: " || return 1
+  [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
+  idx=$((idx_input-1))
+  if (( idx < 0 || idx >= ${#FW_RULE_NAMES[@]} )); then
+    print_warn "Номер вне диапазона."
+    return 0
+  fi
+
+  read_from_tty new_name "Новое имя [${FW_RULE_NAMES[$idx]}]: " || return 1
+  new_name="${new_name:-${FW_RULE_NAMES[$idx]}}"
+
+  echo "Источник для правила #${idx_input}:"
+  echo "  1) оставить как есть (${FW_RULE_SOURCES[$idx]})"
+  echo "  2) all"
+  echo "  3) current-ssh-ip"
+  echo "  4) specific IP/CIDR"
+  while true; do
+    read_from_tty src_choice "Ваш выбор [1/2/3/4]: " || return 1
+    case "$src_choice" in
+      1) new_src="${FW_RULE_SOURCES[$idx]}"; break ;;
+      2) new_src="any"; break ;;
+      3) new_src="__SSH_CLIENT_IP__"; break ;;
+      4)
+        while true; do
+          read_from_tty new_src "Введите IP/CIDR: " || return 1
+          if validate_ip_or_cidr "$new_src"; then
+            break
+          fi
+          print_warn "Некорректный IP/CIDR."
+        done
+        break
+        ;;
+      *) print_warn "Введите 1, 2, 3 или 4." ;;
+    esac
+  done
+
+  echo "Порт для правила #${idx_input}:"
+  echo "  1) оставить как есть (${FW_RULE_PORTS[$idx]})"
+  echo "  2) __SSH__"
+  echo "  3) custom numeric"
+  while true; do
+    read_from_tty port_choice "Ваш выбор [1/2/3]: " || return 1
+    case "$port_choice" in
+      1) new_port="${FW_RULE_PORTS[$idx]}"; break ;;
+      2) new_port="__SSH__"; break ;;
+      3)
+        while true; do
+          read_from_tty new_port "Введите TCP порт: " || return 1
+          if validate_port "$new_port"; then
+            break
+          fi
+          print_warn "Некорректный порт."
+        done
+        break
+        ;;
+      *) print_warn "Введите 1, 2 или 3." ;;
+    esac
+  done
+
+  read_from_tty new_note "Новая заметка [${FW_RULE_NOTES[$idx]}]: " || return 1
+  new_note="${new_note:-${FW_RULE_NOTES[$idx]}}"
+
+  FW_RULE_NAMES[$idx]="$new_name"
+  FW_RULE_SOURCES[$idx]="$new_src"
+  FW_RULE_PORTS[$idx]="$new_port"
+  FW_RULE_NOTES[$idx]="$new_note"
+
+  save_acl_to_disk
+}
+
+delete_fw_rule_interactive() {
+  if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
+    print_warn "Нет правил для удаления."
+    return 0
+  fi
+
+  local idx_input idx confirm
+  read_from_tty idx_input "Введите номер правила для удаления: " || return 1
+  [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
+  idx=$((idx_input-1))
+  if (( idx < 0 || idx >= ${#FW_RULE_NAMES[@]} )); then
+    print_warn "Номер вне диапазона."
+    return 0
+  fi
+
+  read_from_tty confirm "Удалить правило '${FW_RULE_NAMES[$idx]}'? [y/N]: " || return 1
+  case "${confirm:-N}" in
+    y|Y|yes|YES)
+      fw_delete_rule_by_index "$idx"
+      save_acl_to_disk
+      ;;
+    *)
+      ;;
+  esac
+}
+
 resolve_fw_source() {
   local src="$1"
   if [[ "$src" == "__SSH_CLIENT_IP__" ]]; then
@@ -909,7 +1109,9 @@ redraw_acl_screen() {
   echo "  1) Marzban-host"
   echo "  2) Marzban-node"
   echo "  3) Custom rule"
-  echo "  4) Завершить"
+  echo "  4) Изменить правило"
+  echo "  5) Удалить правило"
+  echo "  6) Завершить"
 }
 
 add_profile_marzban_host() {
@@ -1010,33 +1212,55 @@ choose_access_mode() {
         ;;
       2)
         ACCESS_MODE="selected"
-        FW_RULE_NAMES=()
-        FW_RULE_SOURCES=()
-        FW_RULE_PORTS=()
-        FW_RULE_NOTES=()
+        fw_clear_rules
 
         get_client_ip
         print_info "Текущий SSH IP определен автоматически: $CLIENT_IP"
+
+        if [[ -f "$ACL_STORE_JSON" ]]; then
+          local use_saved
+          read_from_tty use_saved "Найден сохраненный ACL. Загрузить его? [Y/n]: " || return 1
+          use_saved="${use_saved:-Y}"
+          case "$use_saved" in
+            y|Y|yes|YES)
+              load_acl_from_disk || true
+              ;;
+            *)
+              fw_clear_rules
+              ;;
+          esac
+        fi
 
         while true; do
           redraw_acl_screen
 
           local item
-          read_from_tty item "Ваш выбор [1/2/3/4]: " || return 1
+          read_from_tty item "Ваш выбор [1/2/3/4/5/6]: " || return 1
           case "$item" in
             1)
               add_profile_marzban_host
+              save_acl_to_disk
               redraw_acl_screen
               ;;
             2)
               add_profile_marzban_node
+              save_acl_to_disk
               redraw_acl_screen
               ;;
             3)
               add_custom_rule
+              save_acl_to_disk
               redraw_acl_screen
               ;;
             4)
+              edit_fw_rule_interactive
+              redraw_acl_screen
+              ;;
+            5)
+              delete_fw_rule_interactive
+              redraw_acl_screen
+              ;;
+            6)
               if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
                 print_warn "Список правил пуст. Добавьте минимум одно правило."
                 continue
@@ -1044,22 +1268,7 @@ choose_access_mode() {
               break
               ;;
             *)
-              print_warn "Введите 1, 2, 3 или 4."
-              ;;
-          esac
-
-          local add_more
-          read_from_tty add_more "Добавить еще правило/IP? [Y/n]: " || return 1
-          add_more="${add_more:-Y}"
-          case "$add_more" in
-            n|N|no|NO)
-              if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
-                print_warn "Список правил пуст. Добавьте минимум одно правило."
-              else
-                break
-              fi
-              ;;
-            *)
+              print_warn "Введите 1, 2, 3, 4, 5 или 6."
               ;;
           esac
         done
