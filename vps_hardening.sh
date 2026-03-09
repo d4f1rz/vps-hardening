@@ -15,6 +15,7 @@ BACKUP_ROOT="/var/backups/vps_hardening"
 BACKUP_ID=""
 BACKUP_DIR=""
 STATE_FILE="${BACKUP_ROOT}/last_state.env"
+INSTALL_META_FILE="${BACKUP_ROOT}/install_meta.env"
 AUTOMATION_CONFIG_FILE="/etc/vps-hardening.conf"
 INSTALLED_SCRIPT_PATH="/usr/local/sbin/vps_hardening.sh"
 MAINT_SCRIPT_PATH="/usr/local/sbin/vps_hardening_maint.sh"
@@ -52,6 +53,9 @@ declare -a FW_RULE_NOTES=()
 SSH_PRIVATE_KEY_CONTENT=""
 SSH_PUBLIC_KEY_CONTENT=""
 SSH_KEY_PASSPHRASE=""
+
+INSTALLED_UFW_BY_SCRIPT=0
+INSTALLED_FAIL2BAN_BY_SCRIPT=0
 
 DELETED_USERS_LIST_FILE=""
 
@@ -188,9 +192,38 @@ SSH_PORT="$SSH_PORT"
 SSH_SERVICE="$SSH_SERVICE"
 ACCESS_MODE="$ACCESS_MODE"
 ALLOWED_IPS_CSV="$ALLOWED_IPS_CSV"
+INSTALLED_UFW_BY_SCRIPT="$INSTALLED_UFW_BY_SCRIPT"
+INSTALLED_FAIL2BAN_BY_SCRIPT="$INSTALLED_FAIL2BAN_BY_SCRIPT"
 EOF
   chmod 600 "$STATE_FILE"
   log "State saved: $STATE_FILE"
+}
+
+save_install_meta() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return 0
+  fi
+
+  mkdir -p "$BACKUP_ROOT"
+  cat > "$INSTALL_META_FILE" <<EOF
+INSTALLED_UFW_BY_SCRIPT="$INSTALLED_UFW_BY_SCRIPT"
+INSTALLED_FAIL2BAN_BY_SCRIPT="$INSTALLED_FAIL2BAN_BY_SCRIPT"
+EOF
+  chmod 600 "$INSTALL_META_FILE"
+  log "Install meta saved: $INSTALL_META_FILE"
+}
+
+load_install_meta() {
+  if [[ -f "$INSTALL_META_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$INSTALL_META_FILE" || true
+  elif [[ -f "$STATE_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATE_FILE" || true
+  fi
+
+  INSTALLED_UFW_BY_SCRIPT="${INSTALLED_UFW_BY_SCRIPT:-0}"
+  INSTALLED_FAIL2BAN_BY_SCRIPT="${INSTALLED_FAIL2BAN_BY_SCRIPT:-0}"
 }
 
 init_backup_snapshot() {
@@ -543,15 +576,34 @@ uninstall_hardening() {
     exit 0
   fi
 
-  reset_to_legacy_baseline
+  load_install_meta
 
-  run_cmd "DEBIAN_FRONTEND=noninteractive apt purge -y fail2ban ufw || true" "Удаление пакетов fail2ban и ufw"
+  if [[ -f "$STATE_FILE" ]]; then
+    print_info "Найден snapshot/state. Выполняется восстановление исходной конфигурации через rollback..."
+    rollback_last
+  else
+    print_warn "STATE/snapshot не найден. Полное восстановление исходного состояния невозможно; выполняется удаление только артефактов hardening."
+  fi
+
+  if [[ "${INSTALLED_FAIL2BAN_BY_SCRIPT}" -eq 1 ]]; then
+    run_cmd "DEBIAN_FRONTEND=noninteractive apt purge -y fail2ban || true" "Удаление fail2ban (установлен скриптом)"
+  else
+    print_info "Fail2ban не удаляется: пакет не был установлен скриптом."
+  fi
+
+  if [[ "${INSTALLED_UFW_BY_SCRIPT}" -eq 1 ]]; then
+    run_cmd "DEBIAN_FRONTEND=noninteractive apt purge -y ufw || true" "Удаление UFW (установлен скриптом)"
+  else
+    print_info "UFW не удаляется: пакет не был установлен скриптом."
+  fi
+
   run_cmd "DEBIAN_FRONTEND=noninteractive apt autoremove -y || true" "Очистка неиспользуемых зависимостей"
 
-  run_cmd "rm -f \"${STATE_FILE}\" \"${AUTOMATION_CONFIG_FILE}\" \"${ACL_STORE_JSON}\"" "Удаление state/config ACL файлов"
+  run_cmd "rm -f \"${STATE_FILE}\" \"${INSTALL_META_FILE}\" \"${AUTOMATION_CONFIG_FILE}\" \"${ACL_STORE_JSON}\"" "Удаление state/config ACL файлов"
   run_cmd "rm -f \"${INSTALLED_SCRIPT_PATH}\" \"${MAINT_SCRIPT_PATH}\"" "Удаление установленных скриптов"
   run_cmd "rm -f \"${SYSTEMD_SERVICE_FILE}\" \"${SYSTEMD_TIMER_FILE}\"" "Удаление systemd unit-файлов обслуживания"
   run_cmd "rm -f \"${DEFERRED_DELETE_SERVICE}\" \"${DEFERRED_DELETE_TIMER}\" \"${DEFERRED_DELETE_SCRIPT}\" \"${DEFERRED_DELETE_LIST}\"" "Удаление deferred delete unit-файлов"
+  run_cmd "rm -f \"${LOG_FILE}\" \"${MAINT_LOG_FILE}\"" "Удаление логов hardening"
   run_cmd "rm -rf \"${BACKUP_ROOT}\" \"${DEFERRED_DELETE_DIR}\"" "Удаление snapshot и runtime каталогов"
   run_cmd "systemctl daemon-reload" "Обновление systemd после полного удаления"
 
@@ -1780,7 +1832,9 @@ step_5_configure_ufw() {
   print_step_header "5" "Настройка UFW" "Закрываем все входящие и открываем только SSH-порт по выбранной IP-модели."
 
   if ! command -v ufw >/dev/null 2>&1; then
+    INSTALLED_UFW_BY_SCRIPT=1
     run_cmd "apt install -y ufw" "Установка UFW"
+    save_install_meta
   fi
 
   run_cmd "ufw default deny incoming" "UFW: deny incoming"
@@ -1822,6 +1876,32 @@ step_5_configure_ufw() {
 
   run_cmd "ufw status verbose" "Проверка статуса UFW"
 
+  # Гарантируем, что все ACL-правила из шага 0.1 действительно попали в UFW.
+  if [[ "$DRY_RUN" -eq 0 && "$ACCESS_MODE" == "selected" ]]; then
+    local ufw_dump
+    ufw_dump="$(ufw status 2>/dev/null || true)"
+
+    local i src port name
+    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+      name="${FW_RULE_NAMES[$i]}"
+      src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
+      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+
+      validate_port "$port" || continue
+      if [[ "$src" == "any" ]]; then
+        if ! echo "$ufw_dump" | grep -Eq "${port}/tcp"; then
+          print_warn "ACL '${name}' не найден в UFW после применения, пробуем добавить повторно."
+          run_cmd "ufw allow ${port}/tcp" "Повторное применение ACL ${name}"
+        fi
+      else
+        if ! echo "$ufw_dump" | grep -Eq "${port}/tcp" || ! echo "$ufw_dump" | grep -Fq "$src"; then
+          print_warn "ACL '${name}' не найден в UFW после применения, пробуем добавить повторно."
+          run_cmd "ufw allow from ${src} to any port ${port} proto tcp" "Повторное применение ACL ${name}"
+        fi
+      fi
+    done
+  fi
+
   echo
   echo "╔════════════════════════════════════════════════════════════════════╗"
   echo "║            ШАГ 5: UFW (ОТКРЫТЫЕ ПОРТЫ И ПРАВИЛА)                 ║"
@@ -1831,10 +1911,12 @@ step_5_configure_ufw() {
 }
 
 step_6_configure_fail2ban() {
-  print_step_header "6" "Настройка Fail2ban" "Автоматический бан брутфорса: 24ч на первый раз, затем увеличение до постоянного."
+  print_step_header "6" "Настройка Fail2ban" "Автоматический бан брутфорса: фиксированные 24 часа по IP без увеличения."
 
   if ! command -v fail2ban-client >/dev/null 2>&1; then
+    INSTALLED_FAIL2BAN_BY_SCRIPT=1
     run_cmd "apt install -y fail2ban" "Установка Fail2ban"
+    save_install_meta
   fi
 
   get_client_ip
@@ -1846,9 +1928,6 @@ step_6_configure_fail2ban() {
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${CLIENT_IP}
 bantime  = 86400
-bantime.increment = true
-bantime.factor = 1
-bantime.maxtime = -1
 findtime = 300
 maxretry = 3
 
@@ -1870,7 +1949,21 @@ EOF
 
   run_cmd "systemctl enable fail2ban" "Включение Fail2ban в автозагрузку"
   run_cmd "systemctl restart fail2ban" "Перезапуск Fail2ban"
-  run_cmd "fail2ban-client status sshd" "Проверка Fail2ban jail sshd"
+
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    set +e
+    fail2ban-client status sshd >> "$LOG_FILE" 2>&1
+    local jail_rc=$?
+    set -e
+    if [[ "$jail_rc" -ne 0 ]]; then
+      print_warn "Не удалось получить status sshd (код ${jail_rc}). Проверяю общий статус Fail2ban без остановки сценария."
+      run_cmd "fail2ban-client status || true" "Проверка общего статуса Fail2ban"
+    else
+      print_ok "Проверка Fail2ban jail sshd"
+    fi
+  else
+    print_warn "[DRY-RUN] Пропущена проверка Fail2ban jail sshd"
+  fi
 
   echo
   echo "╔════════════════════════════════════════════════════════════════════╗"
@@ -1878,8 +1971,8 @@ EOF
   echo "╠════════════════════════════════════════════════════════════════════╣"
   printf "║ ignoreip: %-56s ║\n" "127.0.0.1/8 ::1 ${CLIENT_IP}"
   printf "║ bantime: %-57s ║\n" "86400"
-  printf "║ bantime.increment: %-47s ║\n" "true"
-  printf "║ bantime.multiplier (через factor/maxtime): %-25s ║\n" "1 .. -1"
+  printf "║ bantime.increment: %-47s ║\n" "false (disabled)"
+  printf "║ bantime.multiplier: %-46s ║\n" "disabled"
   printf "║ findtime/maxretry: %-47s ║\n" "300 / 3"
   printf "║ sshd.port: %-55s ║\n" "${SSH_PORT}"
   echo "╚════════════════════════════════════════════════════════════════════╝"
