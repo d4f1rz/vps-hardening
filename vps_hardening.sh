@@ -381,6 +381,144 @@ rollback_last() {
   log "ROLLBACK finished"
 }
 
+set_sshd_defaults_for_reinstall() {
+  set_sshd_option "Port" "22"
+  set_sshd_option "PermitRootLogin" "yes"
+  set_sshd_option "PasswordAuthentication" "yes"
+  set_sshd_option "PubkeyAuthentication" "yes"
+  set_sshd_option "AuthorizedKeysFile" ".ssh/authorized_keys .ssh/authorized_keys2"
+  set_sshd_option "X11Forwarding" "yes"
+  set_sshd_option "MaxAuthTries" "6"
+  set_sshd_option "LoginGraceTime" "120"
+}
+
+purge_all_authorized_keys() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_warn "[DRY-RUN] Пропущено удаление authorized_keys"
+    return 0
+  fi
+
+  find /root /home -maxdepth 3 -type f -name authorized_keys -print -delete >> "$LOG_FILE" 2>&1 || true
+  log "Authorized keys removed under /root and /home"
+}
+
+reset_to_legacy_baseline() {
+  print_step_header "R0" "Сброс к базовой конфигурации" "Выполняем fallback-сброс для старых установок без snapshot."
+
+  # Удаляем automation артефакты, если были.
+  run_cmd "systemctl disable --now vps-hardening-maintenance.timer || true" "Отключение timer auto-maintenance"
+  run_cmd "rm -f \"${SYSTEMD_TIMER_FILE}\" \"${SYSTEMD_SERVICE_FILE}\" \"${MAINT_SCRIPT_PATH}\" \"${AUTOMATION_CONFIG_FILE}\"" "Удаление automation-файлов"
+  run_cmd "systemctl daemon-reload" "Обновление systemd после удаления automation"
+
+  # SSH к более дефолтному состоянию.
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    set_sshd_defaults_for_reinstall
+    local sshd_bin
+    sshd_bin="$(command -v sshd || true)"
+    if [[ -n "$sshd_bin" ]]; then
+      run_cmd "\"${sshd_bin}\" -t" "Проверка sshd_config после сброса"
+    fi
+  fi
+
+  # Чистим ключи доступа и восстанавливаем парольный root вход.
+  purge_all_authorized_keys
+
+  local new_root_password
+  new_root_password="$(gen_secret 16)"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    printf 'root:%s\n' "$new_root_password" | chpasswd
+    log "Root password reset during reinstall baseline"
+    echo
+    echo "╔══════════════════════════════════════════════╗"
+    echo "║     НОВЫЙ ROOT ПАРОЛЬ (СОХРАНИТЕ ЕГО)       ║"
+    echo "╠══════════════════════════════════════════════╣"
+    printf "║ root: %-35s ║\n" "$new_root_password"
+    echo "╚══════════════════════════════════════════════╝"
+  else
+    print_warn "[DRY-RUN] Пропущен сброс root-пароля"
+  fi
+
+  # Пользователи: удаляем все интерактивные, кроме root.
+  local user uid shell
+  while IFS=: read -r user _ uid _ _ _ shell; do
+    if [[ "$uid" -lt 1000 ]]; then
+      continue
+    fi
+    if [[ "$user" == "root" || "$user" == "nobody" ]]; then
+      continue
+    fi
+    if [[ "$shell" == */nologin || "$shell" == */false ]]; then
+      continue
+    fi
+    run_cmd "userdel -r \"${user}\"" "Удаление пользователя ${user} при переустановке"
+  done < /etc/passwd
+
+  # UFW и Fail2ban к базовому виду.
+  run_cmd "ufw --force disable || true" "Отключение UFW"
+  run_cmd "echo 'y' | ufw --force reset || true" "Сброс правил UFW"
+
+  if [[ -f /etc/fail2ban/jail.local ]]; then
+    run_cmd "rm -f /etc/fail2ban/jail.local" "Удаление jail.local"
+  fi
+  run_cmd "systemctl disable --now fail2ban || true" "Отключение Fail2ban"
+
+  run_cmd "systemctl restart ${SSH_SERVICE} || systemctl restart sshd || systemctl restart ssh" "Перезапуск SSH после сброса"
+}
+
+is_hardening_already_present() {
+  # Новый формат (состояние, automation).
+  if [[ -f "$STATE_FILE" || -f "$AUTOMATION_CONFIG_FILE" || -f "$SYSTEMD_TIMER_FILE" ]]; then
+    return 0
+  fi
+
+  # Наследие старых версий: sshd backup, jail.local, активный ufw, измененный SSH.
+  if [[ -f /etc/ssh/sshd_config.bak || -f /etc/fail2ban/jail.local ]]; then
+    return 0
+  fi
+
+  if command -v ufw >/dev/null 2>&1; then
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+      return 0
+    fi
+  fi
+
+  if [[ -f /etc/ssh/sshd_config ]]; then
+    if grep -Eq '^[[:space:]]*Port[[:space:]]+(2222|[1-9][0-9]{3,4})' /etc/ssh/sshd_config; then
+      return 0
+    fi
+    if grep -Eq '^[[:space:]]*PermitRootLogin[[:space:]]+no' /etc/ssh/sshd_config; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+handle_reinstall_if_needed() {
+  if ! is_hardening_already_present; then
+    return 0
+  fi
+
+  echo
+  print_warn "Похоже, hardening уже настроен на этом сервере."
+  print_info "Можно выполнить переустановку: автоматический откат к базовому состоянию и повторная настройка с нуля."
+
+  if ! ask_confirm "Выполнить переустановку сейчас?"; then
+    print_warn "Переустановка отменена. Скрипт завершен без изменений."
+    exit 0
+  fi
+
+  if [[ -f "$STATE_FILE" ]]; then
+    print_info "Найден snapshot/state. Выполняется откат последнего запуска..."
+    rollback_last
+  else
+    print_warn "Snapshot не найден (возможно старая версия скрипта). Запускается fallback-сброс."
+    reset_to_legacy_baseline
+  fi
+
+  print_ok "Сброс завершен, начинается новая чистая настройка."
+}
+
 print_step_header() {
   local step_num="$1"
   local title="$2"
@@ -1036,6 +1174,8 @@ main() {
     print_warn "Операция отменена пользователем."
     exit 0
   fi
+
+  handle_reinstall_if_needed
 
   choose_access_mode
   init_backup_snapshot
