@@ -1,11 +1,11 @@
 #!/bin/bash
 # VPS Hardening Script
-# Version: 1.3.1
+# Version: 1.3.2
 # Compatibility: Ubuntu 20.04+ / Debian 11+
 
 set -euo pipefail
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 LOG_FILE="/var/log/vps_hardening.log"
 DRY_RUN=0
 ROLLBACK=0
@@ -162,7 +162,7 @@ handle_error() {
 show_banner() {
   cat <<'EOF'
 ╔══════════════════════════════════════════════════════════╗
-║            VPS HARDENING SCRIPT v1.3.1                  ║
+║            VPS HARDENING SCRIPT v1.3.2                  ║
 ║     Автоматическая защита VPS (Ubuntu/Debian)           ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
@@ -723,6 +723,26 @@ detect_ssh_service() {
   log "SSH service: $SSH_SERVICE"
 }
 
+detect_current_ssh_port() {
+  local sshd_bin
+  local detected
+  sshd_bin="$(command -v sshd || true)"
+  if [[ -z "$sshd_bin" ]]; then
+    SSH_PORT="22"
+    log "Current SSH port detection skipped: sshd not found, fallback 22"
+    return 0
+  fi
+
+  detected="$("$sshd_bin" -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+  if validate_port "$detected"; then
+    SSH_PORT="$detected"
+    log "Current SSH port detected: $SSH_PORT"
+  else
+    SSH_PORT="22"
+    log "Current SSH port detection fallback to 22"
+  fi
+}
+
 get_server_ip() {
   SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   SERVER_IP="${SERVER_IP:-<IP_СЕРВЕРА>}"
@@ -877,6 +897,21 @@ render_fw_table() {
   echo "╚════╩════════════════════╩══════════════════════╩════════════╩═══════════════════════════╝"
 }
 
+redraw_acl_screen() {
+  if [[ -t 1 ]]; then
+    printf '\033[2J\033[H'
+  fi
+  show_banner
+  echo
+  echo "Режим ACL (selected). Текущий SSH IP: ${CLIENT_IP}, текущий SSH порт: ${SSH_PORT}"
+  render_fw_table
+  echo "Добавить правило/шаблон:"
+  echo "  1) Marzban-host"
+  echo "  2) Marzban-node"
+  echo "  3) Custom rule"
+  echo "  4) Завершить"
+}
+
 add_profile_marzban_host() {
   fw_add_rule "marzban-host:ssh" "__SSH_CLIENT_IP__" "__SSH__" "SSH admin from current IP"
   fw_add_rule "marzban-host:web80" "any" "80" "HTTP for cert/website"
@@ -984,24 +1019,22 @@ choose_access_mode() {
         print_info "Текущий SSH IP определен автоматически: $CLIENT_IP"
 
         while true; do
-          render_fw_table
-          echo "Добавить правило/шаблон:"
-          echo "  1) Marzban-host"
-          echo "  2) Marzban-node"
-          echo "  3) Custom rule"
-          echo "  4) Завершить"
+          redraw_acl_screen
 
           local item
           read_from_tty item "Ваш выбор [1/2/3/4]: " || return 1
           case "$item" in
             1)
               add_profile_marzban_host
+              redraw_acl_screen
               ;;
             2)
               add_profile_marzban_node
+              redraw_acl_screen
               ;;
             3)
               add_custom_rule
+              redraw_acl_screen
               ;;
             4)
               if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
@@ -1623,6 +1656,7 @@ main() {
   init_log
   check_os
   detect_ssh_service
+  detect_current_ssh_port
 
   if [[ "$ROLLBACK" -eq 1 ]]; then
     rollback_last
