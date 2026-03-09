@@ -191,6 +191,7 @@ curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_har
 - `Custom rule`:
   - порт: `__SSH__` или любой numeric
   - source: `all`, текущий SSH IP, или specific IP/CIDR
+  - диапазон порта для ACL: `0-65535`
 
 Управление правилами в мастере ACL:
 

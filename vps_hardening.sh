@@ -838,6 +838,13 @@ validate_username() {
 validate_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  (( port >= 0 && port <= 65535 )) || return 1
+  return 0
+}
+
+validate_ssh_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
   (( port >= 1024 && port <= 65535 )) || return 1
   return 0
 }
@@ -1886,7 +1893,7 @@ step_4_secure_ssh_access() {
   while true; do
     read_from_tty input_port "Введите новый SSH-порт [1024-65535, Enter = 2222]: " || return 1
     input_port="${input_port:-2222}"
-    if validate_port "$input_port"; then
+    if validate_ssh_port "$input_port"; then
       SSH_PORT="$input_port"
       break
     fi
