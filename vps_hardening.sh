@@ -108,17 +108,21 @@ ask_confirm() {
   local prompt="$1"
   local answer
 
-  if ! read_from_tty answer "$prompt [Y/n]: "; then
-    print_error "Не удалось получить интерактивный ввод (TTY недоступен)."
-    return 1
-  fi
+  while true; do
+    if ! read_from_tty answer "$prompt [Y/n]: "; then
+      print_error "Не удалось получить интерактивный ввод (TTY недоступен)."
+      return 1
+    fi
 
-  answer="${answer:-Y}"
-  case "$answer" in
-    Y|y|yes|YES) return 0 ;;
-    N|n|no|NO) return 1 ;;
-    *) return 0 ;;
-  esac
+    answer="${answer:-Y}"
+    case "$answer" in
+      Y|y|yes|YES) return 0 ;;
+      N|n|no|NO) return 1 ;;
+      *)
+        print_warn "Некорректный ввод. Введите y/yes или n/no."
+        ;;
+    esac
+  done
 }
 
 read_from_tty() {
@@ -653,7 +657,9 @@ run_cmd() {
   printf "\r\033[2K"
 
   if [[ "$rc" -ne 0 ]]; then
-    handle_error "Ошибка выполнения: $action (код $rc)"
+    if handle_error "Ошибка выполнения: $action (код $rc)"; then
+      return 0
+    fi
     return 1
   fi
 
