@@ -747,7 +747,17 @@ detect_current_ssh_port() {
     return 0
   fi
 
+  set +e
   detected="$("$sshd_bin" -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+  local rc=$?
+  set -e
+
+  if [[ "$rc" -ne 0 ]]; then
+    SSH_PORT="22"
+    log "Current SSH port detection failed (sshd -T rc=$rc), fallback 22"
+    return 0
+  fi
+
   if validate_port "$detected"; then
     SSH_PORT="$detected"
     log "Current SSH port detected: $SSH_PORT"
