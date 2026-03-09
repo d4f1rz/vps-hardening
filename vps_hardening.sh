@@ -728,12 +728,82 @@ get_server_ip() {
   SERVER_IP="${SERVER_IP:-<IP_СЕРВЕРА>}"
 }
 
+is_valid_remote_ip() {
+  local ip="$1"
+  [[ -n "$ip" ]] || return 1
+  [[ "$ip" != "127.0.0.1" ]] || return 1
+  [[ "$ip" != "::1" ]] || return 1
+  [[ "$ip" != "localhost" ]] || return 1
+  return 0
+}
+
 get_client_ip() {
-  CLIENT_IP="$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')"
-  if [[ -z "$CLIENT_IP" ]]; then
-    CLIENT_IP="$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')"
+  local candidate=""
+  local tty_name="${SSH_TTY:-}"
+
+  candidate="$(echo "${SSH_CONNECTION:-}" | awk '{print $1}')"
+  if is_valid_remote_ip "$candidate"; then
+    CLIENT_IP="$candidate"
+    log "Client IP detected from SSH_CONNECTION: $CLIENT_IP"
+    return 0
   fi
-  CLIENT_IP="${CLIENT_IP:-127.0.0.1}"
+
+  candidate="$(echo "${SSH_CLIENT:-}" | awk '{print $1}')"
+  if is_valid_remote_ip "$candidate"; then
+    CLIENT_IP="$candidate"
+    log "Client IP detected from SSH_CLIENT: $CLIENT_IP"
+    return 0
+  fi
+
+  if [[ -n "$tty_name" ]]; then
+    candidate="$(who 2>/dev/null | awk -v t="$tty_name" '$2==substr(t,6){print $5}' | tr -d '()' | head -n1)"
+    if is_valid_remote_ip "$candidate"; then
+      CLIENT_IP="$candidate"
+      log "Client IP detected from who/SSH_TTY: $CLIENT_IP"
+      return 0
+    fi
+  fi
+
+  candidate="$(who am i 2>/dev/null | awk '{print $5}' | tr -d '()')"
+  if is_valid_remote_ip "$candidate"; then
+    CLIENT_IP="$candidate"
+    log "Client IP detected from who am i: $CLIENT_IP"
+    return 0
+  fi
+
+  if [[ -f /var/log/auth.log ]]; then
+    candidate="$(grep -E 'sshd\[[0-9]+\]: Accepted .* from ' /var/log/auth.log | tail -n1 | sed -E 's/.* from ([^ ]+).*/\1/')"
+    if is_valid_remote_ip "$candidate"; then
+      CLIENT_IP="$candidate"
+      log "Client IP detected from /var/log/auth.log: $CLIENT_IP"
+      return 0
+    fi
+  fi
+
+  if command -v journalctl >/dev/null 2>&1; then
+    candidate="$(journalctl -u ssh -u sshd -n 200 --no-pager 2>/dev/null | grep -E 'Accepted .* from ' | tail -n1 | sed -E 's/.* from ([^ ]+).*/\1/')"
+    if is_valid_remote_ip "$candidate"; then
+      CLIENT_IP="$candidate"
+      log "Client IP detected from journalctl: $CLIENT_IP"
+      return 0
+    fi
+  fi
+
+  print_warn "Не удалось автоматически определить внешний IP SSH-клиента."
+  while true; do
+    read_from_tty candidate "Введите ваш внешний IP вручную: " || break
+    if validate_ip_or_cidr "$candidate"; then
+      candidate="${candidate%%/*}"
+      if is_valid_remote_ip "$candidate"; then
+        CLIENT_IP="$candidate"
+        log "Client IP set manually: $CLIENT_IP"
+        return 0
+      fi
+    fi
+    print_warn "Введите корректный внешний IP (не localhost)."
+  done
+
+  CLIENT_IP="127.0.0.1"
   log "Client IP detected: $CLIENT_IP"
 }
 
