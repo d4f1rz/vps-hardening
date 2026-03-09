@@ -14,6 +14,12 @@ curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_har
 curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh | sudo bash -s -- --rollback
 ```
 
+## 🧹 Полное удаление hardening (1 команда)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh | sudo bash -s -- --uninstall
+```
+
 ## 📋 Что делает скрипт
 
 | Шаг | Описание | Интерактивный? |
@@ -260,7 +266,11 @@ ssh <user>@<IP> -p <port>
 Создается `jail.local` с параметрами:
 
 - `ignoreip`: `127.0.0.1`, `::1` и IP вашего текущего подключения
-- `bantime = 24h`
+- `bantime = 86400`
+- `bantime.increment = true`
+- `bantime.factor = 1`
+- `bantime.maxtime = -1`
+- эквивалент `bantime.multiplier: 1 .. -1` (рост до постоянного)
 - `findtime = 300`
 - `maxretry = 3`
 - порт автоматически подставляется из SSH-порта
@@ -299,6 +309,12 @@ ssh <user>@<IP> -p <port>
   - команда подключения
   - `user/password`
   - `private key/public key/passphrase`
+  - ACL-таблица модели доступа по IP (для `selected`)
+  - активность UFW и список разрешенных портов
+  - активность Fail2ban
+  - статус автообслуживания (`systemd timer`)
+  - команда для rollback
+  - команда для полного удаления hardening
   - путь к логу
 
 ### После завершения: как подключиться
@@ -313,6 +329,7 @@ ssh -p <ВАШ_ПОРТ> <ВАШ_ПОЛЬЗОВАТЕЛЬ>@<IP_СЕРВЕРА>
 |------|----------|
 | `--dry-run` | Симуляция без изменений в системе |
 | `--rollback` | Откат последнего запуска из snapshot-бэкапа |
+| `--uninstall` | Полное удаление hardening-конфигурации и пакетов `fail2ban`/`ufw` |
 | `--help` | Справка по использованию |
 
 ## 🔍 Проверка после установки

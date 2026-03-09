@@ -1,14 +1,15 @@
 #!/bin/bash
 # VPS Hardening Script
-# Version: 1.3.2
+# Version: 1.3.3
 # Compatibility: Ubuntu 20.04+ / Debian 11+
 
 set -euo pipefail
 
-VERSION="1.3.2"
+VERSION="1.3.3"
 LOG_FILE="/var/log/vps_hardening.log"
 DRY_RUN=0
 ROLLBACK=0
+UNINSTALL=0
 
 BACKUP_ROOT="/var/backups/vps_hardening"
 BACKUP_ID=""
@@ -82,11 +83,12 @@ init_log() {
 show_help() {
   cat <<'EOF'
 Использование:
-  bash vps_hardening.sh [--dry-run] [--rollback] [--help]
+  bash vps_hardening.sh [--dry-run] [--rollback] [--uninstall] [--help]
 
 Опции:
   --dry-run   Симуляция без реальных изменений.
   --rollback  Откат последнего применения hardening.
+  --uninstall Полное удаление hardening-артефактов и пакетов fail2ban/ufw.
   --help      Показать справку.
 
 Что делает скрипт:
@@ -167,7 +169,7 @@ handle_error() {
 show_banner() {
   cat <<'EOF'
 ╔══════════════════════════════════════════════════════════╗
-║            VPS HARDENING SCRIPT v1.3.2                  ║
+║            VPS HARDENING SCRIPT v1.3.3                  ║
 ║     Автоматическая защита VPS (Ubuntu/Debian)           ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
@@ -533,6 +535,84 @@ reset_to_legacy_baseline() {
   run_cmd "systemctl restart ${SSH_SERVICE} || systemctl restart sshd || systemctl restart ssh" "Перезапуск SSH после сброса"
 }
 
+uninstall_hardening() {
+  print_step_header "U" "Полное удаление hardening" "Удаляем hardening-конфигурацию, таймеры и пакеты fail2ban/ufw."
+
+  if ! ask_confirm "Продолжить полное удаление hardening?"; then
+    print_warn "Удаление отменено пользователем."
+    exit 0
+  fi
+
+  reset_to_legacy_baseline
+
+  run_cmd "DEBIAN_FRONTEND=noninteractive apt purge -y fail2ban ufw || true" "Удаление пакетов fail2ban и ufw"
+  run_cmd "DEBIAN_FRONTEND=noninteractive apt autoremove -y || true" "Очистка неиспользуемых зависимостей"
+
+  run_cmd "rm -f \"${STATE_FILE}\" \"${AUTOMATION_CONFIG_FILE}\" \"${ACL_STORE_JSON}\"" "Удаление state/config ACL файлов"
+  run_cmd "rm -f \"${INSTALLED_SCRIPT_PATH}\" \"${MAINT_SCRIPT_PATH}\"" "Удаление установленных скриптов"
+  run_cmd "rm -f \"${SYSTEMD_SERVICE_FILE}\" \"${SYSTEMD_TIMER_FILE}\"" "Удаление systemd unit-файлов обслуживания"
+  run_cmd "rm -f \"${DEFERRED_DELETE_SERVICE}\" \"${DEFERRED_DELETE_TIMER}\" \"${DEFERRED_DELETE_SCRIPT}\" \"${DEFERRED_DELETE_LIST}\"" "Удаление deferred delete unit-файлов"
+  run_cmd "rm -rf \"${BACKUP_ROOT}\" \"${DEFERRED_DELETE_DIR}\"" "Удаление snapshot и runtime каталогов"
+  run_cmd "systemctl daemon-reload" "Обновление systemd после полного удаления"
+
+  print_ok "Hardening полностью удален. apt update/upgrade не откатываются (ожидаемо)."
+  log "UNINSTALL finished"
+}
+
+get_ufw_state() {
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "not-installed"
+    return 0
+  fi
+
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    echo "active"
+  else
+    echo "inactive"
+  fi
+}
+
+get_service_state() {
+  local service_name="$1"
+  if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+    echo "active"
+  else
+    echo "inactive"
+  fi
+}
+
+get_timer_enabled_state() {
+  local timer_name="$1"
+  if systemctl is-enabled --quiet "$timer_name" 2>/dev/null; then
+    echo "enabled"
+  else
+    echo "disabled"
+  fi
+}
+
+print_ufw_rules_summary() {
+  local rules
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_warn "[DRY-RUN] Список UFW правил недоступен"
+    return 0
+  fi
+
+  if ! command -v ufw >/dev/null 2>&1; then
+    print_warn "UFW не установлен"
+    return 0
+  fi
+
+  rules="$(ufw status numbered 2>/dev/null | sed -n 's/^\[[[:space:]]*[0-9]\+\][[:space:]]*//p')"
+
+  echo "Разрешенные порты/правила UFW:"
+  if [[ -z "$rules" ]]; then
+    echo "  (нет явных allow-правил)"
+  else
+    echo "$rules" | sed 's/^/  - /'
+  fi
+}
+
 is_hardening_already_present() {
   # Новый формат (состояние, automation).
   if [[ -f "$STATE_FILE" || -f "$AUTOMATION_CONFIG_FILE" || -f "$SYSTEMD_TIMER_FILE" ]]; then
@@ -608,6 +688,9 @@ parse_args() {
         ;;
       --rollback)
         ROLLBACK=1
+        ;;
+      --uninstall)
+        UNINSTALL=1
         ;;
       --help|-h)
         show_help
@@ -1625,6 +1708,18 @@ step_3_ssh_keys_auto() {
     print_warn "[DRY-RUN] SSH-ключи не созданы"
     log "DRY-RUN: skip ssh key generation"
   fi
+
+  echo
+  echo "╔════════════════════════════════════════════════════════════════════╗"
+  echo "║                  ШАГ 3: SSH-КЛЮЧИ (СОХРАНИТЕ)                   ║"
+  echo "╠════════════════════════════════════════════════════════════════════╣"
+  printf "║ User: %-60s ║\n" "$NEW_USER"
+  printf "║ Passphrase: %-54s ║\n" "$SSH_KEY_PASSPHRASE"
+  echo "╚════════════════════════════════════════════════════════════════════╝"
+  echo "---------------------- SSH PRIVATE KEY ----------------------"
+  echo "$SSH_PRIVATE_KEY_CONTENT"
+  echo "---------------------- SSH PUBLIC KEY -----------------------"
+  echo "$SSH_PUBLIC_KEY_CONTENT"
 }
 
 step_4_secure_ssh_access() {
@@ -1672,7 +1767,12 @@ step_4_secure_ssh_access() {
 
   get_server_ip
   echo
-  print_info "Новая команда подключения: ssh ${NEW_USER}@${SERVER_IP} -p ${SSH_PORT}"
+  echo "╔════════════════════════════════════════════════════════════════════╗"
+  echo "║             ШАГ 4: ПАРАМЕТРЫ SSH ПОДКЛЮЧЕНИЯ                      ║"
+  echo "╠════════════════════════════════════════════════════════════════════╣"
+  printf "║ Server: %-58s ║\n" "${SERVER_IP}:${SSH_PORT}"
+  printf "║ Connect: %-57s ║\n" "ssh ${NEW_USER}@${SERVER_IP} -p ${SSH_PORT}"
+  echo "╚════════════════════════════════════════════════════════════════════╝"
   print_warn "Текущую сессию не закрывайте до проверки нового входа."
 }
 
@@ -1721,6 +1821,13 @@ step_5_configure_ufw() {
   fi
 
   run_cmd "ufw status verbose" "Проверка статуса UFW"
+
+  echo
+  echo "╔════════════════════════════════════════════════════════════════════╗"
+  echo "║            ШАГ 5: UFW (ОТКРЫТЫЕ ПОРТЫ И ПРАВИЛА)                 ║"
+  echo "╚════════════════════════════════════════════════════════════════════╝"
+  print_ufw_rules_summary
+  print_info "Команда подключения: ssh ${NEW_USER}@${SERVER_IP} -p ${SSH_PORT}"
 }
 
 step_6_configure_fail2ban() {
@@ -1731,20 +1838,19 @@ step_6_configure_fail2ban() {
   fi
 
   get_client_ip
+  print_info "SSH Connect IP для ignoreip: ${CLIENT_IP}"
   local jail_file="/etc/fail2ban/jail.local"
 
   if [[ "$DRY_RUN" -eq 0 ]]; then
     cat > "$jail_file" <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${CLIENT_IP}
-bantime  = 24h
+bantime  = 86400
+bantime.increment = true
+bantime.factor = 1
+bantime.maxtime = -1
 findtime = 300
 maxretry = 3
-
-bantime.increment = true
-bantime.factor = 2
-bantime.maxtime = -1
-bantime.overalljails = true
 
 [sshd]
 enabled  = true
@@ -1753,7 +1859,7 @@ logpath  = %(sshd_log)s
 backend  = %(sshd_backend)s
 maxretry = 3
 findtime = 300
-bantime  = 24h
+bantime  = 86400
 EOF
     chmod 644 "$jail_file"
     log "Updated $jail_file"
@@ -1765,6 +1871,18 @@ EOF
   run_cmd "systemctl enable fail2ban" "Включение Fail2ban в автозагрузку"
   run_cmd "systemctl restart fail2ban" "Перезапуск Fail2ban"
   run_cmd "fail2ban-client status sshd" "Проверка Fail2ban jail sshd"
+
+  echo
+  echo "╔════════════════════════════════════════════════════════════════════╗"
+  echo "║                  ШАГ 6: FAIL2BAN ПАРАМЕТРЫ                       ║"
+  echo "╠════════════════════════════════════════════════════════════════════╣"
+  printf "║ ignoreip: %-56s ║\n" "127.0.0.1/8 ::1 ${CLIENT_IP}"
+  printf "║ bantime: %-57s ║\n" "86400"
+  printf "║ bantime.increment: %-47s ║\n" "true"
+  printf "║ bantime.multiplier (через factor/maxtime): %-25s ║\n" "1 .. -1"
+  printf "║ findtime/maxretry: %-47s ║\n" "300 / 3"
+  printf "║ sshd.port: %-55s ║\n" "${SSH_PORT}"
+  echo "╚════════════════════════════════════════════════════════════════════╝"
 }
 
 step_7_restart_ssh() {
@@ -1905,6 +2023,19 @@ step_9_final_report() {
   get_server_ip
   get_client_ip
 
+  local ufw_state fail2ban_state auto_timer_enabled auto_timer_state
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    ufw_state="dry-run"
+    fail2ban_state="dry-run"
+    auto_timer_enabled="dry-run"
+    auto_timer_state="dry-run"
+  else
+    ufw_state="$(get_ufw_state)"
+    fail2ban_state="$(get_service_state fail2ban)"
+    auto_timer_enabled="$(get_timer_enabled_state vps-hardening-maintenance.timer)"
+    auto_timer_state="$(get_service_state vps-hardening-maintenance.timer)"
+  fi
+
   local access_human
   if [[ "$ACCESS_MODE" == "all" ]]; then
     access_human="ALL"
@@ -1922,6 +2053,10 @@ step_9_final_report() {
   printf "║ Client IP (ignoreip): %-46s ║\n" "$CLIENT_IP"
   printf "║ User: %-60s ║\n" "$NEW_USER"
   printf "║ Password: %-56s ║\n" "$NEW_USER_PASSWORD"
+  printf "║ UFW active: %-54s ║\n" "$ufw_state"
+  printf "║ Fail2ban active: %-49s ║\n" "$fail2ban_state"
+  printf "║ Auto-maint timer enabled: %-39s ║\n" "$auto_timer_enabled"
+  printf "║ Auto-maint timer active: %-40s ║\n" "$auto_timer_state"
   printf "║ Log file: %-56s ║\n" "$LOG_FILE"
   printf "║ Auto-maint log: %-51s ║\n" "$MAINT_LOG_FILE"
   printf "║ Auto-maint timer: %-48s ║\n" "vps-hardening-maintenance.timer"
@@ -1943,12 +2078,25 @@ step_9_final_report() {
   fi
 
   echo
+  print_ufw_rules_summary
+
+  echo
   echo "---------------------- SSH PRIVATE KEY ----------------------"
   echo "$SSH_PRIVATE_KEY_CONTENT"
   echo "---------------------- SSH PUBLIC KEY -----------------------"
   echo "$SSH_PUBLIC_KEY_CONTENT"
   echo "---------------------- SSH PASSPHRASE -----------------------"
   echo "$SSH_KEY_PASSPHRASE"
+
+  echo
+  echo "Команда отката (rollback):"
+  echo "  sudo bash vps_hardening.sh --rollback"
+  echo "  curl -fsSL ${DEFAULT_SELF_UPDATE_URL} | sudo bash -s -- --rollback"
+
+  echo
+  echo "Команда полного удаления hardening (включая fail2ban/ufw):"
+  echo "  sudo bash vps_hardening.sh --uninstall"
+  echo "  curl -fsSL ${DEFAULT_SELF_UPDATE_URL} | sudo bash -s -- --uninstall"
 
   echo
   print_warn "Не закрывайте текущую сессию, пока не проверите вход новой командой."
@@ -1969,6 +2117,11 @@ main() {
 
   if [[ "$ROLLBACK" -eq 1 ]]; then
     rollback_last
+    exit 0
+  fi
+
+  if [[ "$UNINSTALL" -eq 1 ]]; then
+    uninstall_hardening
     exit 0
   fi
 
