@@ -141,17 +141,26 @@ curl -fsSL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_har
 Как работает режим `selected`:
 
 - автоматически добавляется IP текущего SSH-клиента (`ssh-client-auto`)
-- выводится таблица: `name / ip / profile / allow ports`
-- далее цикл: `Добавить новый IP? [y/n]`
-- при `y` добавляете новую запись и таблица сразу обновляется
+- выводится таблица правил: `name / source / port / note`
+- далее добавляете шаблон или custom-правило
+- после каждого добавления: `Добавить еще правило/IP? [Y/n]`
 - при `n` скрипт переходит к следующему шагу
 
 Профили в ACL:
 
-- `ssh-only`: `__SSH__`
-- `marzban-host`: `__SSH__,80,443,2053,2083,2087,2096,8443`
-- `marzban-node`: `__SSH__,443,2053,2083,2087,2096,8443`
-- `custom`: вручную
+- `Marzban-host`:
+  - `__SSH__` только для текущего SSH IP
+  - `80/tcp` для всех
+  - `443/tcp` для всех
+- `Marzban-node`:
+  - `__SSH__` только для текущего SSH IP
+  - `80/tcp` для всех
+  - `443/tcp` для всех
+  - `62050/tcp` только для IP Marzban-host
+  - `62051/tcp` только для IP Marzban-host
+- `Custom rule`:
+  - порт: `__SSH__` или любой numeric
+  - source: `all`, текущий SSH IP, или specific IP/CIDR
 
 Примечание про смену SSH порта:
 
@@ -220,7 +229,8 @@ ssh <user>@<IP> -p <port>
 
 - Политики: `deny incoming`, `allow outgoing`.
 - Для `all` открывается только SSH-порт, выбранный на шаге 4.
-- Для `selected` применяются ACL-правила из таблицы (IP/CIDR + профиль портов).
+- Для `selected` применяется таблица ACL/FW-правил (source+port).
+- Перед применением делается `ufw reset`, чтобы старые порты не оставались после смены SSH-порта.
 
 **Шаг 6. Fail2ban**
 

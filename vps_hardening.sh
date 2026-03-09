@@ -37,15 +37,14 @@ CLIENT_IP=""
 ACCESS_MODE="all"     # all | selected
 ALLOWED_IPS_CSV=""
 
-# ACL таблица для режима selected.
-declare -a ACL_NAMES=()
-declare -a ACL_IPS=()
-declare -a ACL_PROFILES=()
-declare -a ACL_PORTS=()
+MARZBAN_SERVICE_PORT="62050"
+XRAY_API_PORT="62051"
 
-PROFILE_SSH_ONLY="__SSH__"
-PROFILE_MARZBAN_HOST="__SSH__,80,443,2053,2083,2087,2096,8443"
-PROFILE_MARZBAN_NODE="__SSH__,443,2053,2083,2087,2096,8443"
+# Firewall rule таблица для режима selected.
+declare -a FW_RULE_NAMES=()
+declare -a FW_RULE_SOURCES=()  # any | __SSH_CLIENT_IP__ | <IP/CIDR>
+declare -a FW_RULE_PORTS=()    # __SSH__ | <port>
+declare -a FW_RULE_NOTES=()
 
 SSH_PRIVATE_KEY_CONTENT=""
 SSH_PUBLIC_KEY_CONTENT=""
@@ -705,132 +704,162 @@ get_client_ip() {
   log "Client IP detected: $CLIENT_IP"
 }
 
-validate_ports_csv() {
-  local csv="$1"
-  local p
-  IFS=',' read -r -a ports <<< "$csv"
-  for p in "${ports[@]}"; do
-    p="$(echo "$p" | xargs)"
-    if [[ "$p" == "__SSH__" ]]; then
+fw_add_rule() {
+  local name="$1"
+  local src="$2"
+  local port="$3"
+  local note="$4"
+  FW_RULE_NAMES+=("$name")
+  FW_RULE_SOURCES+=("$src")
+  FW_RULE_PORTS+=("$port")
+  FW_RULE_NOTES+=("$note")
+}
+
+resolve_fw_source() {
+  local src="$1"
+  if [[ "$src" == "__SSH_CLIENT_IP__" ]]; then
+    echo "$CLIENT_IP"
+  else
+    echo "$src"
+  fi
+}
+
+resolve_fw_port() {
+  local port="$1"
+  if [[ "$port" == "__SSH__" ]]; then
+    echo "$SSH_PORT"
+  else
+    echo "$port"
+  fi
+}
+
+rebuild_allowed_ips_csv() {
+  local i src resolved
+  local unique=()
+  ALLOWED_IPS_CSV=""
+
+  for ((i=0; i<${#FW_RULE_SOURCES[@]}; i++)); do
+    src="${FW_RULE_SOURCES[$i]}"
+    resolved="$(resolve_fw_source "$src")"
+    if [[ "$resolved" == "any" ]]; then
       continue
     fi
-    if ! validate_port "$p"; then
-      return 1
+    if [[ ",${unique[*]}," != *",${resolved},"* ]]; then
+      unique+=("$resolved")
     fi
   done
-  return 0
+
+  if [[ "${#unique[@]}" -gt 0 ]]; then
+    ALLOWED_IPS_CSV="$(IFS=,; echo "${unique[*]}")"
+  fi
 }
 
-acl_add_entry() {
-  local name="$1"
-  local ip="$2"
-  local profile="$3"
-  local ports_csv="$4"
-
-  ACL_NAMES+=("$name")
-  ACL_IPS+=("$ip")
-  ACL_PROFILES+=("$profile")
-  ACL_PORTS+=("$ports_csv")
-}
-
-acl_render_table() {
+render_fw_table() {
   echo
-  echo "╔════════════════════════════════════════════════════════════════════════════════════╗"
-  echo "║ ACL СПИСОК ДОПУСКА (режим selected)                                              ║"
-  echo "╠════╦════════════════════╦══════════════════════╦════════════════╦═════════════════╣"
-  echo "║ #  ║ Name               ║ IP/CIDR              ║ Profile        ║ Allow ports     ║"
-  echo "╠════╬════════════════════╬══════════════════════╬════════════════╬═════════════════╣"
-
-  local i
-  if [[ "${#ACL_NAMES[@]}" -eq 0 ]]; then
-    echo "║ -- ║ (пока пусто)       ║ -                    ║ -              ║ -               ║"
+  echo "╔══════════════════════════════════════════════════════════════════════════════════════════╗"
+  echo "║ ACL/FW ПРАВИЛА (режим selected)                                                        ║"
+  echo "╠════╦════════════════════╦══════════════════════╦════════════╦═══════════════════════════╣"
+  echo "║ #  ║ Name               ║ Source               ║ Port       ║ Note                      ║"
+  echo "╠════╬════════════════════╬══════════════════════╬════════════╬═══════════════════════════╣"
+  local i src port
+  if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
+    echo "║ -- ║ (пока пусто)       ║ -                    ║ -          ║ -                         ║"
   else
-    for ((i=0; i<${#ACL_NAMES[@]}; i++)); do
-      printf "║ %-2s ║ %-18s ║ %-20s ║ %-14s ║ %-15s ║\n" "$((i+1))" "${ACL_NAMES[$i]}" "${ACL_IPS[$i]}" "${ACL_PROFILES[$i]}" "${ACL_PORTS[$i]}"
+    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+      src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
+      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+      printf "║ %-2s ║ %-18s ║ %-20s ║ %-10s ║ %-25s ║\n" "$((i+1))" "${FW_RULE_NAMES[$i]}" "$src" "$port" "${FW_RULE_NOTES[$i]}"
     done
   fi
-
-  echo "╚════╩════════════════════╩══════════════════════╩════════════════╩═════════════════╝"
+  echo "╚════╩════════════════════╩══════════════════════╩════════════╩═══════════════════════════╝"
 }
 
-acl_collect_entry_interactive() {
-  local entry_name=""
-  local entry_ip=""
-  local profile_choice=""
-  local ports_csv=""
-  local profile_name=""
+add_profile_marzban_host() {
+  fw_add_rule "marzban-host:ssh" "__SSH_CLIENT_IP__" "__SSH__" "SSH admin from current IP"
+  fw_add_rule "marzban-host:web80" "any" "80" "HTTP for cert/website"
+  fw_add_rule "marzban-host:web443" "any" "443" "HTTPS public"
+}
 
+add_profile_marzban_node() {
+  local host_ip
   while true; do
-    read -r -p "Введите имя записи (например node-1): " entry_name
-    entry_name="${entry_name:-entry-$((${#ACL_NAMES[@]}+1))}"
-    if [[ "$entry_name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    read -r -p "Введите IP/CIDR Marzban-host: " host_ip
+    if validate_ip_or_cidr "$host_ip"; then
       break
     fi
-    print_warn "Имя записи: только буквы/цифры/._-"
+    print_warn "Некорректный IP/CIDR."
   done
 
+  fw_add_rule "marzban-node:ssh" "__SSH_CLIENT_IP__" "__SSH__" "SSH admin from current IP"
+  fw_add_rule "marzban-node:80" "any" "80" "HTTP для certbot (временно/по задаче)"
+  fw_add_rule "marzban-node:443" "any" "443" "HTTPS ingress"
+  fw_add_rule "marzban-node:62050" "$host_ip" "$MARZBAN_SERVICE_PORT" "Marzban Node service"
+  fw_add_rule "marzban-node:62051" "$host_ip" "$XRAY_API_PORT" "Xray API for host"
+}
+
+add_custom_rule() {
+  local name src_choice src port_choice port
   while true; do
-    read -r -p "Введите IP/CIDR: " entry_ip
-    if validate_ip_or_cidr "$entry_ip"; then
+    read -r -p "Имя custom-правила: " name
+    name="${name:-custom-$((${#FW_RULE_NAMES[@]}+1))}"
+    if [[ "$name" =~ ^[A-Za-z0-9._:-]+$ ]]; then
       break
     fi
-    print_warn "Некорректный IP/CIDR. Пример: 1.2.3.4 или 5.6.7.0/24"
+    print_warn "Имя правила: только буквы/цифры/._:-"
   done
 
-  echo
-  echo "Выберите профиль портов:"
-  echo "  1) ssh-only      (__SSH__)"
-  echo "  2) marzban-host  (__SSH__,80,443,2053,2083,2087,2096,8443)"
-  echo "  3) marzban-node  (__SSH__,443,2053,2083,2087,2096,8443)"
-  echo "  4) custom        (ввести вручную)"
-
+  echo "Источник доступа:"
+  echo "  1) all"
+  echo "  2) current-ssh-ip"
+  echo "  3) specific IP/CIDR"
   while true; do
-    read -r -p "Ваш выбор [1/2/3/4]: " profile_choice
-    case "$profile_choice" in
-      1)
-        profile_name="ssh-only"
-        ports_csv="$PROFILE_SSH_ONLY"
-        break
-        ;;
-      2)
-        profile_name="marzban-host"
-        ports_csv="$PROFILE_MARZBAN_HOST"
-        break
-        ;;
+    read -r -p "Ваш выбор [1/2/3]: " src_choice
+    case "$src_choice" in
+      1) src="any"; break ;;
+      2) src="__SSH_CLIENT_IP__"; break ;;
       3)
-        profile_name="marzban-node"
-        ports_csv="$PROFILE_MARZBAN_NODE"
-        break
-        ;;
-      4)
-        profile_name="custom"
         while true; do
-          read -r -p "Введите порты через запятую (можно __SSH__, пример: __SSH__,443,8443): " ports_csv
-          if [[ -z "$ports_csv" ]]; then
-            print_warn "Список портов не может быть пустым."
-            continue
-          fi
-          if validate_ports_csv "$ports_csv"; then
+          read -r -p "Введите IP/CIDR: " src
+          if validate_ip_or_cidr "$src"; then
             break
           fi
-          print_warn "Некорректный список портов."
+          print_warn "Некорректный IP/CIDR."
         done
         break
         ;;
-      *)
-        print_warn "Введите 1, 2, 3 или 4."
-        ;;
+      *) print_warn "Введите 1, 2 или 3." ;;
     esac
   done
 
-  acl_add_entry "$entry_name" "$entry_ip" "$profile_name" "$ports_csv"
+  echo "Порт правила:"
+  echo "  1) __SSH__ (автоподстановка текущего SSH-порта)"
+  echo "  2) custom numeric"
+  while true; do
+    read -r -p "Ваш выбор [1/2]: " port_choice
+    case "$port_choice" in
+      1) port="__SSH__"; break ;;
+      2)
+        while true; do
+          read -r -p "Введите TCP порт: " port
+          if validate_port "$port"; then
+            break
+          fi
+          print_warn "Некорректный порт."
+        done
+        break
+        ;;
+      *) print_warn "Введите 1 или 2." ;;
+    esac
+  done
+
+  fw_add_rule "$name" "$src" "$port" "custom"
 }
 
 choose_access_mode() {
   echo
   echo "Выберите модель доступа по IP для SSH:"
   echo "  1) Разрешить вход с любых IP"
-  echo "  2) Разрешить вход только с выбранных IP/CIDR"
+  echo "  2) Режим ACL (таблица правил и профили)"
 
   local choice
   while true; do
@@ -843,39 +872,63 @@ choose_access_mode() {
         ;;
       2)
         ACCESS_MODE="selected"
-        ACL_NAMES=()
-        ACL_IPS=()
-        ACL_PROFILES=()
-        ACL_PORTS=()
+        FW_RULE_NAMES=()
+        FW_RULE_SOURCES=()
+        FW_RULE_PORTS=()
+        FW_RULE_NOTES=()
 
         get_client_ip
-        acl_add_entry "ssh-client-auto" "$CLIENT_IP" "ssh-only" "$PROFILE_SSH_ONLY"
-
-        acl_render_table
+        print_info "Текущий SSH IP определен автоматически: $CLIENT_IP"
 
         while true; do
-          local add_more
-          read -r -p "Добавить новый IP в ACL? [y/N]: " add_more
-          add_more="${add_more:-N}"
-          case "$add_more" in
-            y|Y|yes|YES)
-              acl_collect_entry_interactive
-              acl_render_table
+          render_fw_table
+          echo "Добавить правило/шаблон:"
+          echo "  1) Marzban-host"
+          echo "  2) Marzban-node"
+          echo "  3) Custom rule"
+          echo "  4) Завершить"
+
+          local item
+          read -r -p "Ваш выбор [1/2/3/4]: " item
+          case "$item" in
+            1)
+              add_profile_marzban_host
               ;;
-            n|N|no|NO)
+            2)
+              add_profile_marzban_node
+              ;;
+            3)
+              add_custom_rule
+              ;;
+            4)
+              if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
+                print_warn "Список правил пуст. Добавьте минимум одно правило."
+                continue
+              fi
               break
               ;;
             *)
-              print_warn "Введите y или n."
+              print_warn "Введите 1, 2, 3 или 4."
+              ;;
+          esac
+
+          local add_more
+          read -r -p "Добавить еще правило/IP? [Y/n]: " add_more
+          add_more="${add_more:-Y}"
+          case "$add_more" in
+            n|N|no|NO)
+              if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
+                print_warn "Список правил пуст. Добавьте минимум одно правило."
+              else
+                break
+              fi
+              ;;
+            *)
               ;;
           esac
         done
 
-        if [[ "${#ACL_NAMES[@]}" -eq 0 ]]; then
-          handle_error "ACL пустой. Для режима selected нужен хотя бы один IP."
-        fi
-
-        ALLOWED_IPS_CSV="$(IFS=,; echo "${ACL_IPS[*]}")"
+        rebuild_allowed_ips_csv
         break
         ;;
       *)
@@ -884,7 +937,7 @@ choose_access_mode() {
     esac
   done
 
-  log "Access mode: $ACCESS_MODE; allowed=${ALLOWED_IPS_CSV:-ALL}"
+  log "Access mode: $ACCESS_MODE; allowed=${ALLOWED_IPS_CSV:-ALL}; rules=${#FW_RULE_NAMES[@]}"
 }
 
 set_sshd_option() {
@@ -1022,23 +1075,6 @@ safe_delete_user() {
   fi
 
   run_cmd "userdel -r \"${user}\"" "$action_label"
-}
-
-resolve_ports_csv_for_runtime() {
-  local csv="$1"
-  local p
-  local out=()
-  IFS=',' read -r -a parts <<< "$csv"
-  for p in "${parts[@]}"; do
-    p="$(echo "$p" | xargs)"
-    if [[ "$p" == "__SSH__" ]]; then
-      out+=("$SSH_PORT")
-    else
-      out+=("$p")
-    fi
-  done
-  IFS=','
-  echo "${out[*]}"
 }
 
 prune_old_users() {
@@ -1214,19 +1250,18 @@ step_5_configure_ufw() {
   if [[ "$ACCESS_MODE" == "all" ]]; then
     run_cmd "ufw allow ${SSH_PORT}/tcp" "Разрешение SSH с любых IP"
   else
-    local i ip name ports_csv resolved_ports p
-    for ((i=0; i<${#ACL_IPS[@]}; i++)); do
-      ip="${ACL_IPS[$i]}"
-      name="${ACL_NAMES[$i]}"
-      ports_csv="${ACL_PORTS[$i]}"
-      resolved_ports="$(resolve_ports_csv_for_runtime "$ports_csv")"
+    local i src port name
+    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+      name="${FW_RULE_NAMES[$i]}"
+      src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
+      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
 
-      IFS=',' read -r -a ports <<< "$resolved_ports"
-      for p in "${ports[@]}"; do
-        p="$(echo "$p" | xargs)"
-        validate_port "$p" || continue
-        run_cmd "ufw allow from ${ip} to any port ${p} proto tcp" "ACL ${name}: разрешение ${ip} -> tcp/${p}"
-      done
+      validate_port "$port" || continue
+      if [[ "$src" == "any" ]]; then
+        run_cmd "ufw allow ${port}/tcp" "ACL ${name}: allow any -> tcp/${port}"
+      else
+        run_cmd "ufw allow from ${src} to any port ${port} proto tcp" "ACL ${name}: allow ${src} -> tcp/${port}"
+      fi
     done
   fi
 
@@ -1429,7 +1464,7 @@ step_9_final_report() {
   if [[ "$ACCESS_MODE" == "all" ]]; then
     access_human="ALL"
   else
-    access_human="SELECTED (${#ACL_IPS[@]} entries)"
+    access_human="SELECTED (${#FW_RULE_NAMES[@]} rules)"
   fi
 
   echo
@@ -1449,16 +1484,17 @@ step_9_final_report() {
 
   if [[ "$ACCESS_MODE" == "selected" ]]; then
     echo
-    echo "ACL таблица (актуальные порты):"
-    echo "┌────┬────────────────────┬──────────────────────┬────────────────┬─────────────────┐"
-    echo "│ #  │ Name               │ IP/CIDR              │ Profile        │ Allow ports     │"
-    echo "├────┼────────────────────┼──────────────────────┼────────────────┼─────────────────┤"
-    local i resolved
-    for ((i=0; i<${#ACL_IPS[@]}; i++)); do
-      resolved="$(resolve_ports_csv_for_runtime "${ACL_PORTS[$i]}")"
-      printf "│ %-2s │ %-18s │ %-20s │ %-14s │ %-15s │\n" "$((i+1))" "${ACL_NAMES[$i]}" "${ACL_IPS[$i]}" "${ACL_PROFILES[$i]}" "$resolved"
+    echo "ACL таблица (актуальные правила):"
+    echo "┌────┬────────────────────┬──────────────────────┬────────────┬───────────────────┐"
+    echo "│ #  │ Name               │ Source               │ Port       │ Note              │"
+    echo "├────┼────────────────────┼──────────────────────┼────────────┼───────────────────┤"
+    local i src port
+    for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+      src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
+      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+      printf "│ %-2s │ %-18s │ %-20s │ %-10s │ %-17s │\n" "$((i+1))" "${FW_RULE_NAMES[$i]}" "$src" "$port" "${FW_RULE_NOTES[$i]}"
     done
-    echo "└────┴────────────────────┴──────────────────────┴────────────────┴─────────────────┘"
+    echo "└────┴────────────────────┴──────────────────────┴────────────┴───────────────────┘"
   fi
 
   echo
