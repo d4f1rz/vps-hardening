@@ -951,8 +951,15 @@ edit_fw_rule_interactive() {
     return 0
   fi
 
+  echo
+  echo "Выберите правило для изменения:"
+  local i
+  for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+    printf "  %s) %s\n" "$((i+1))" "${FW_RULE_NAMES[$i]}"
+  done
+
   local idx_input idx new_name src_choice new_src port_choice new_port new_note
-  read_from_tty idx_input "Введите номер правила для изменения: " || return 1
+  read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}]: " || return 1
   [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
   idx=$((idx_input-1))
   if (( idx < 0 || idx >= ${#FW_RULE_NAMES[@]} )); then
@@ -1028,8 +1035,15 @@ delete_fw_rule_interactive() {
     return 0
   fi
 
+  echo
+  echo "Выберите правило для удаления:"
+  local i
+  for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
+    printf "  %s) %s\n" "$((i+1))" "${FW_RULE_NAMES[$i]}"
+  done
+
   local idx_input idx confirm
-  read_from_tty idx_input "Введите номер правила для удаления: " || return 1
+  read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}]: " || return 1
   [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
   idx=$((idx_input-1))
   if (( idx < 0 || idx >= ${#FW_RULE_NAMES[@]} )); then
@@ -1115,13 +1129,44 @@ redraw_acl_screen() {
   echo
   echo "Режим ACL (selected). Текущий SSH IP: ${CLIENT_IP}, текущий SSH порт: ${SSH_PORT}"
   render_fw_table
+  echo "Действие с правилами:"
+  echo "  1) Добавить"
+  echo "  2) Изменить"
+  echo "  3) Удалить"
+  echo "  4) Завершить"
+}
+
+add_rule_menu() {
+  local item
+  echo
   echo "Добавить правило/шаблон:"
   echo "  1) Marzban-host"
   echo "  2) Marzban-node"
   echo "  3) Custom rule"
-  echo "  4) Изменить правило"
-  echo "  5) Удалить правило"
-  echo "  6) Завершить"
+
+  while true; do
+    read_from_tty item "Ваш выбор [1/2/3]: " || return 1
+    case "$item" in
+      1)
+        add_profile_marzban_host
+        save_acl_to_disk
+        return 0
+        ;;
+      2)
+        add_profile_marzban_node
+        save_acl_to_disk
+        return 0
+        ;;
+      3)
+        add_custom_rule
+        save_acl_to_disk
+        return 0
+        ;;
+      *)
+        print_warn "Введите 1, 2 или 3."
+        ;;
+    esac
+  done
 }
 
 add_profile_marzban_host() {
@@ -1245,32 +1290,21 @@ choose_access_mode() {
           redraw_acl_screen
 
           local item
-          read_from_tty item "Ваш выбор [1/2/3/4/5/6]: " || return 1
+          read_from_tty item "Ваш выбор [1/2/3/4]: " || return 1
           case "$item" in
             1)
-              add_profile_marzban_host
-              save_acl_to_disk
+              add_rule_menu
               redraw_acl_screen
               ;;
             2)
-              add_profile_marzban_node
-              save_acl_to_disk
-              redraw_acl_screen
-              ;;
-            3)
-              add_custom_rule
-              save_acl_to_disk
-              redraw_acl_screen
-              ;;
-            4)
               edit_fw_rule_interactive
               redraw_acl_screen
               ;;
-            5)
+            3)
               delete_fw_rule_interactive
               redraw_acl_screen
               ;;
-            6)
+            4)
               if [[ "${#FW_RULE_NAMES[@]}" -eq 0 ]]; then
                 print_warn "Список правил пуст. Добавьте минимум одно правило."
                 continue
@@ -1278,7 +1312,7 @@ choose_access_mode() {
               break
               ;;
             *)
-              print_warn "Введите 1, 2, 3, 4, 5 или 6."
+              print_warn "Введите 1, 2, 3 или 4."
               ;;
           esac
         done
