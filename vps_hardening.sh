@@ -958,7 +958,7 @@ edit_fw_rule_interactive() {
     printf "  %s) %s\n" "$((i+1))" "${FW_RULE_NAMES[$i]}"
   done
 
-  local idx_input idx new_name src_choice new_src port_choice new_port new_note
+  local idx_input idx edit_choice new_name src_choice new_src port_choice new_port new_note
   read_from_tty idx_input "Ваш выбор [1-${#FW_RULE_NAMES[@]}]: " || return 1
   [[ "$idx_input" =~ ^[0-9]+$ ]] || { print_warn "Нужен номер."; return 0; }
   idx=$((idx_input-1))
@@ -967,59 +967,87 @@ edit_fw_rule_interactive() {
     return 0
   fi
 
-  read_from_tty new_name "Новое имя [${FW_RULE_NAMES[$idx]}]: " || return 1
-  new_name="${new_name:-${FW_RULE_NAMES[$idx]}}"
-
-  echo "Источник для правила #${idx_input}:"
-  echo "  1) оставить как есть (${FW_RULE_SOURCES[$idx]})"
-  echo "  2) all"
-  echo "  3) current-ssh-ip"
-  echo "  4) specific IP/CIDR"
+  echo
+  echo "Что изменить в правиле '${FW_RULE_NAMES[$idx]}'?"
+  echo "  1) Name"
+  echo "  2) Source"
+  echo "  3) Port"
+  echo "  4) Note"
+  echo "  5) Всё сразу"
   while true; do
-    read_from_tty src_choice "Ваш выбор [1/2/3/4]: " || return 1
-    case "$src_choice" in
-      1) new_src="${FW_RULE_SOURCES[$idx]}"; break ;;
-      2) new_src="any"; break ;;
-      3) new_src="__SSH_CLIENT_IP__"; break ;;
-      4)
-        while true; do
-          read_from_tty new_src "Введите IP/CIDR: " || return 1
-          if validate_ip_or_cidr "$new_src"; then
-            break
-          fi
-          print_warn "Некорректный IP/CIDR."
-        done
-        break
-        ;;
-      *) print_warn "Введите 1, 2, 3 или 4." ;;
+    read_from_tty edit_choice "Ваш выбор [1/2/3/4/5]: " || return 1
+    case "$edit_choice" in
+      1|2|3|4|5) break ;;
+      *) print_warn "Введите 1, 2, 3, 4 или 5." ;;
     esac
   done
 
-  echo "Порт для правила #${idx_input}:"
-  echo "  1) оставить как есть (${FW_RULE_PORTS[$idx]})"
-  echo "  2) __SSH__"
-  echo "  3) custom numeric"
-  while true; do
-    read_from_tty port_choice "Ваш выбор [1/2/3]: " || return 1
-    case "$port_choice" in
-      1) new_port="${FW_RULE_PORTS[$idx]}"; break ;;
-      2) new_port="__SSH__"; break ;;
-      3)
-        while true; do
-          read_from_tty new_port "Введите TCP порт: " || return 1
-          if validate_port "$new_port"; then
-            break
-          fi
-          print_warn "Некорректный порт."
-        done
-        break
-        ;;
-      *) print_warn "Введите 1, 2 или 3." ;;
-    esac
-  done
+  new_name="${FW_RULE_NAMES[$idx]}"
+  new_src="${FW_RULE_SOURCES[$idx]}"
+  new_port="${FW_RULE_PORTS[$idx]}"
+  new_note="${FW_RULE_NOTES[$idx]}"
 
-  read_from_tty new_note "Новая заметка [${FW_RULE_NOTES[$idx]}]: " || return 1
-  new_note="${new_note:-${FW_RULE_NOTES[$idx]}}"
+  if [[ "$edit_choice" == "1" || "$edit_choice" == "5" ]]; then
+    read_from_tty new_name "Новое имя [${FW_RULE_NAMES[$idx]}]: " || return 1
+    new_name="${new_name:-${FW_RULE_NAMES[$idx]}}"
+  fi
+
+  if [[ "$edit_choice" == "2" || "$edit_choice" == "5" ]]; then
+    echo "Источник для правила #${idx_input}:"
+    echo "  1) оставить как есть (${FW_RULE_SOURCES[$idx]})"
+    echo "  2) all"
+    echo "  3) current-ssh-ip"
+    echo "  4) specific IP/CIDR"
+    while true; do
+      read_from_tty src_choice "Ваш выбор [1/2/3/4]: " || return 1
+      case "$src_choice" in
+        1) new_src="${FW_RULE_SOURCES[$idx]}"; break ;;
+        2) new_src="any"; break ;;
+        3) new_src="__SSH_CLIENT_IP__"; break ;;
+        4)
+          while true; do
+            read_from_tty new_src "Введите IP/CIDR: " || return 1
+            if validate_ip_or_cidr "$new_src"; then
+              break
+            fi
+            print_warn "Некорректный IP/CIDR."
+          done
+          break
+          ;;
+        *) print_warn "Введите 1, 2, 3 или 4." ;;
+      esac
+    done
+  fi
+
+  if [[ "$edit_choice" == "3" || "$edit_choice" == "5" ]]; then
+    echo "Порт для правила #${idx_input}:"
+    echo "  1) оставить как есть (${FW_RULE_PORTS[$idx]})"
+    echo "  2) __SSH__"
+    echo "  3) custom numeric"
+    while true; do
+      read_from_tty port_choice "Ваш выбор [1/2/3]: " || return 1
+      case "$port_choice" in
+        1) new_port="${FW_RULE_PORTS[$idx]}"; break ;;
+        2) new_port="__SSH__"; break ;;
+        3)
+          while true; do
+            read_from_tty new_port "Введите TCP порт: " || return 1
+            if validate_port "$new_port"; then
+              break
+            fi
+            print_warn "Некорректный порт."
+          done
+          break
+          ;;
+        *) print_warn "Введите 1, 2 или 3." ;;
+      esac
+    done
+  fi
+
+  if [[ "$edit_choice" == "4" || "$edit_choice" == "5" ]]; then
+    read_from_tty new_note "Новая заметка [${FW_RULE_NOTES[$idx]}]: " || return 1
+    new_note="${new_note:-${FW_RULE_NOTES[$idx]}}"
+  fi
 
   FW_RULE_NAMES[$idx]="$new_name"
   FW_RULE_SOURCES[$idx]="$new_src"
