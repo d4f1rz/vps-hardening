@@ -405,6 +405,13 @@ rollback_last() {
 
   run_cmd "ufw --force reload" "Перезагрузка UFW"
 
+  rollback_adjust_sshd_auth
+  local sshd_bin
+  sshd_bin="$(command -v sshd || true)"
+  if [[ -n "$sshd_bin" ]]; then
+    run_cmd "\"${sshd_bin}\" -t" "Проверка sshd_config после rollback-настроек auth"
+  fi
+
   local restore_user
   local list_file="${BACKUP_DIR}/deleted_users/list.txt"
   if [[ -f "$list_file" ]]; then
@@ -1263,6 +1270,54 @@ resolve_fw_port() {
   fi
 }
 
+resolve_fw_port_for_rule() {
+  local name="$1"
+  local port="$2"
+
+  if [[ "$port" == "__SSH__" ]]; then
+    echo "$SSH_PORT"
+    return 0
+  fi
+
+  # Для ACL ssh-правил используем актуальный порт из шага 4,
+  # даже если в сохраненном ACL остался старый фиксированный порт.
+  if [[ "$name" == *":ssh" ]]; then
+    echo "$SSH_PORT"
+    return 0
+  fi
+
+  echo "$port"
+}
+
+rollback_adjust_sshd_auth() {
+  local cfg="/etc/ssh/sshd_config"
+  if [[ ! -f "$cfg" ]]; then
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_warn "[DRY-RUN] Пропущена корректировка SSH auth (password on, key auth commented)"
+    return 0
+  fi
+
+  sed -ri 's|^[#[:space:]]*PasswordAuthentication[[:space:]].*|PasswordAuthentication yes|g' "$cfg"
+  sed -ri 's|^[#[:space:]]*KbdInteractiveAuthentication[[:space:]].*|KbdInteractiveAuthentication yes|g' "$cfg" || true
+
+  if grep -Eq '^[#[:space:]]*PubkeyAuthentication[[:space:]]+' "$cfg"; then
+    sed -ri 's|^[#[:space:]]*PubkeyAuthentication[[:space:]].*|# PubkeyAuthentication no|g' "$cfg"
+  else
+    echo "# PubkeyAuthentication no" >> "$cfg"
+  fi
+
+  if grep -Eq '^[#[:space:]]*AuthorizedKeysFile[[:space:]]+' "$cfg"; then
+    sed -ri 's|^[#[:space:]]*AuthorizedKeysFile[[:space:]].*|# AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2|g' "$cfg"
+  else
+    echo "# AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2" >> "$cfg"
+  fi
+
+  log "Rollback adjusted sshd auth: password enabled, key auth commented"
+}
+
 rebuild_allowed_ips_csv() {
   local i src resolved
   local unique=()
@@ -1297,7 +1352,7 @@ render_fw_table() {
   else
     for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
       src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
-      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+      port="$(resolve_fw_port_for_rule "${FW_RULE_NAMES[$i]}" "${FW_RULE_PORTS[$i]}")"
       printf "║ %-2s ║ %-18s ║ %-20s ║ %-10s ║ %-25s ║\n" "$((i+1))" "${FW_RULE_NAMES[$i]}" "$src" "$port" "${FW_RULE_NOTES[$i]}"
     done
   fi
@@ -1829,7 +1884,7 @@ step_4_secure_ssh_access() {
 }
 
 step_5_configure_ufw() {
-  print_step_header "5" "Настройка UFW" "Закрываем все входящие и открываем только SSH-порт по выбранной IP-модели."
+  print_step_header "5" "Настройка UFW" "Применяем правила только из выбранной IP-модели (ACL из шага 0.1 или SSH only для режима all)."
 
   if ! command -v ufw >/dev/null 2>&1; then
     INSTALLED_UFW_BY_SCRIPT=1
@@ -1853,7 +1908,7 @@ step_5_configure_ufw() {
     for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
       name="${FW_RULE_NAMES[$i]}"
       src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
-      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+      port="$(resolve_fw_port_for_rule "${name}" "${FW_RULE_PORTS[$i]}")"
 
       validate_port "$port" || continue
       if [[ "$src" == "any" ]]; then
@@ -1885,7 +1940,7 @@ step_5_configure_ufw() {
     for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
       name="${FW_RULE_NAMES[$i]}"
       src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
-      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+      port="$(resolve_fw_port_for_rule "${name}" "${FW_RULE_PORTS[$i]}")"
 
       validate_port "$port" || continue
       if [[ "$src" == "any" ]]; then
@@ -2164,7 +2219,7 @@ step_9_final_report() {
     local i src port
     for ((i=0; i<${#FW_RULE_NAMES[@]}; i++)); do
       src="$(resolve_fw_source "${FW_RULE_SOURCES[$i]}")"
-      port="$(resolve_fw_port "${FW_RULE_PORTS[$i]}")"
+      port="$(resolve_fw_port_for_rule "${FW_RULE_NAMES[$i]}" "${FW_RULE_PORTS[$i]}")"
       printf "│ %-2s │ %-18s │ %-20s │ %-10s │ %-17s │\n" "$((i+1))" "${FW_RULE_NAMES[$i]}" "$src" "$port" "${FW_RULE_NOTES[$i]}"
     done
     echo "└────┴────────────────────┴──────────────────────┴────────────┴───────────────────┘"
