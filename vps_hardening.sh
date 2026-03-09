@@ -1,11 +1,11 @@
 #!/bin/bash
 # VPS Hardening Script
-# Version: 1.3.0
+# Version: 1.3.1
 # Compatibility: Ubuntu 20.04+ / Debian 11+
 
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 LOG_FILE="/var/log/vps_hardening.log"
 DRY_RUN=0
 ROLLBACK=0
@@ -26,6 +26,7 @@ DEFERRED_DELETE_LIST="${DEFERRED_DELETE_DIR}/deferred_delete_users.list"
 DEFERRED_DELETE_SCRIPT="/usr/local/sbin/vps_hardening_deferred_delete.sh"
 DEFERRED_DELETE_SERVICE="/etc/systemd/system/vps-hardening-deferred-delete.service"
 DEFERRED_DELETE_TIMER="/etc/systemd/system/vps-hardening-deferred-delete.timer"
+INTERACTIVE_FD=0
 
 NEW_USER=""
 NEW_USER_PASSWORD=""
@@ -124,14 +125,26 @@ read_from_tty() {
   local __prompt="$2"
   local __value=""
 
-  if [[ -r /dev/tty ]]; then
-    read -r -p "$__prompt" __value < /dev/tty || return 1
-  else
-    read -r -p "$__prompt" __value || return 1
-  fi
+  read -r -u "$INTERACTIVE_FD" -p "$__prompt" __value || return 1
 
   printf -v "$__var_name" '%s' "$__value"
   return 0
+}
+
+init_interactive_io() {
+  if [[ -t 0 ]]; then
+    INTERACTIVE_FD=0
+    return 0
+  fi
+
+  if [[ -r /dev/tty ]]; then
+    exec 3<> /dev/tty
+    INTERACTIVE_FD=3
+    return 0
+  fi
+
+  print_error "Интерактивный режим недоступен: нет TTY. Запустите скрипт из интерактивной консоли."
+  exit 1
 }
 
 handle_error() {
@@ -149,7 +162,7 @@ handle_error() {
 show_banner() {
   cat <<'EOF'
 ╔══════════════════════════════════════════════════════════╗
-║            VPS HARDENING SCRIPT v1.3.0                  ║
+║            VPS HARDENING SCRIPT v1.3.1                  ║
 ║     Автоматическая защита VPS (Ubuntu/Debian)           ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
@@ -1536,6 +1549,7 @@ step_9_final_report() {
 main() {
   parse_args "$@"
   check_root
+  init_interactive_io
   init_log
   check_os
   detect_ssh_service
