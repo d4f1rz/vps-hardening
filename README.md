@@ -35,7 +35,8 @@ sudo bash vps_hardening.sh
 | 5 | Настройка UFW: открывается только SSH-порт по выбранной IP-модели | Нет |
 | 6 | Настройка Fail2ban с `ignoreip` текущего клиента и усиленным баном | Нет |
 | 7 | Перезапуск SSH и финальная проверка | Нет |
-| 8 | Большой итоговый отчет с командами доступа и ключами | Нет |
+| 8 | Настройка автозагрузки/автообновления (systemd timer) | Нет |
+| 9 | Большой итоговый отчет с командами доступа и ключами | Нет |
 
 ## 🖥️ Совместимость
 
@@ -194,7 +195,28 @@ ssh <user>@<IP> -p <port>
 - Перезапуск SSH-сервиса
 - Проверка статуса сервиса
 
-**Шаг 8. Финальный отчет**
+**Шаг 8. Автозагрузка и автообновления**
+
+Скрипт автоматически настраивает `systemd` обслуживание:
+
+- автозапуск через `vps-hardening-maintenance.timer`
+- старт через 5 минут после boot
+- повтор каждые 24 часа
+- `self-update` скрипта из GitHub raw
+- `apt update && apt upgrade -y`
+- обновление внутренних компонентов безопасности (`fail2ban`, `ufw`, `openssh-*`)
+
+Создаваемые файлы:
+
+```text
+/usr/local/sbin/vps_hardening.sh
+/usr/local/sbin/vps_hardening_maint.sh
+/etc/vps-hardening.conf
+/etc/systemd/system/vps-hardening-maintenance.service
+/etc/systemd/system/vps-hardening-maintenance.timer
+```
+
+**Шаг 9. Финальный отчет**
 
 - Большая итоговая таблица:
   - `IP:port`
@@ -228,6 +250,13 @@ ufw status verbose
 
 # Fail2ban
 fail2ban-client status sshd
+
+# Проверка автозапуска и автообновления
+systemctl status vps-hardening-maintenance.timer
+systemctl list-timers | grep vps-hardening
+
+# Лог автоматического обслуживания
+tail -n 100 /var/log/vps_hardening_maintenance.log
 
 # Слушающие порты
 ss -tulpen

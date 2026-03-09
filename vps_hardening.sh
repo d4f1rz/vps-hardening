@@ -1,11 +1,11 @@
 #!/bin/bash
 # VPS Hardening Script
-# Version: 1.2.0
+# Version: 1.3.0
 # Compatibility: Ubuntu 20.04+ / Debian 11+
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 LOG_FILE="/var/log/vps_hardening.log"
 DRY_RUN=0
 ROLLBACK=0
@@ -14,6 +14,13 @@ BACKUP_ROOT="/var/backups/vps_hardening"
 BACKUP_ID=""
 BACKUP_DIR=""
 STATE_FILE="${BACKUP_ROOT}/last_state.env"
+AUTOMATION_CONFIG_FILE="/etc/vps-hardening.conf"
+INSTALLED_SCRIPT_PATH="/usr/local/sbin/vps_hardening.sh"
+MAINT_SCRIPT_PATH="/usr/local/sbin/vps_hardening_maint.sh"
+MAINT_LOG_FILE="/var/log/vps_hardening_maintenance.log"
+SYSTEMD_SERVICE_FILE="/etc/systemd/system/vps-hardening-maintenance.service"
+SYSTEMD_TIMER_FILE="/etc/systemd/system/vps-hardening-maintenance.timer"
+DEFAULT_SELF_UPDATE_URL="https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh"
 
 NEW_USER=""
 NEW_USER_PASSWORD=""
@@ -74,8 +81,10 @@ show_help() {
   5) Усиливает SSH-конфиг
   6) Настраивает UFW (доступ: всем или только выбранным IP)
   7) Настраивает Fail2ban
-  8) Перезапускает SSH и показывает итоговый отчет
-  9) Поддерживает rollback из snapshot-бэкапа
+  8) Перезапускает SSH
+  9) Настраивает автозапуск и автообслуживание (self-update + update/upgrade)
+  10) Показывает итоговый отчет
+  11) Поддерживает rollback из snapshot-бэкапа
 EOF
 }
 
@@ -106,7 +115,7 @@ handle_error() {
 show_banner() {
   cat <<'EOF'
 ╔══════════════════════════════════════════════════════════╗
-║            VPS HARDENING SCRIPT v1.2.0                  ║
+║            VPS HARDENING SCRIPT v1.3.0                  ║
 ║     Автоматическая защита VPS (Ubuntu/Debian)           ║
 ╚══════════════════════════════════════════════════════════╝
 EOF
@@ -157,6 +166,26 @@ init_backup_snapshot() {
 
   if [[ -f /etc/ufw/user6.rules ]]; then
     cp /etc/ufw/user6.rules "${BACKUP_DIR}/files/ufw_user6.rules.before"
+  fi
+
+  if [[ -f "$AUTOMATION_CONFIG_FILE" ]]; then
+    cp "$AUTOMATION_CONFIG_FILE" "${BACKUP_DIR}/files/vps-hardening.conf.before"
+  fi
+
+  if [[ -f "$INSTALLED_SCRIPT_PATH" ]]; then
+    cp "$INSTALLED_SCRIPT_PATH" "${BACKUP_DIR}/files/vps_hardening.sh.before"
+  fi
+
+  if [[ -f "$MAINT_SCRIPT_PATH" ]]; then
+    cp "$MAINT_SCRIPT_PATH" "${BACKUP_DIR}/files/vps_hardening_maint.sh.before"
+  fi
+
+  if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
+    cp "$SYSTEMD_SERVICE_FILE" "${BACKUP_DIR}/files/vps-hardening-maintenance.service.before"
+  fi
+
+  if [[ -f "$SYSTEMD_TIMER_FILE" ]]; then
+    cp "$SYSTEMD_TIMER_FILE" "${BACKUP_DIR}/files/vps-hardening-maintenance.timer.before"
   fi
 
   ufw status verbose > "${BACKUP_DIR}/files/ufw_status.before" 2>/dev/null || true
@@ -229,6 +258,51 @@ rollback_last() {
   if [[ -f "${BACKUP_DIR}/files/ufw_user6.rules.before" ]]; then
     run_cmd "cp \"${BACKUP_DIR}/files/ufw_user6.rules.before\" /etc/ufw/user6.rules" "Восстановление UFW IPv6 правил"
   fi
+
+  if [[ -f "${BACKUP_DIR}/files/vps-hardening.conf.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/vps-hardening.conf.before\" \"${AUTOMATION_CONFIG_FILE}\"" "Восстановление automation-конфига"
+  else
+    if [[ -f "$AUTOMATION_CONFIG_FILE" ]]; then
+      run_cmd "rm -f \"${AUTOMATION_CONFIG_FILE}\"" "Удаление automation-конфига"
+    fi
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/vps_hardening.sh.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/vps_hardening.sh.before\" \"${INSTALLED_SCRIPT_PATH}\"" "Восстановление установленного скрипта"
+    run_cmd "chmod 700 \"${INSTALLED_SCRIPT_PATH}\"" "Права на установленный скрипт"
+  else
+    if [[ -f "$INSTALLED_SCRIPT_PATH" ]]; then
+      run_cmd "rm -f \"${INSTALLED_SCRIPT_PATH}\"" "Удаление установленного скрипта"
+    fi
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/vps_hardening_maint.sh.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/vps_hardening_maint.sh.before\" \"${MAINT_SCRIPT_PATH}\"" "Восстановление maintenance-скрипта"
+    run_cmd "chmod 700 \"${MAINT_SCRIPT_PATH}\"" "Права на maintenance-скрипт"
+  else
+    if [[ -f "$MAINT_SCRIPT_PATH" ]]; then
+      run_cmd "rm -f \"${MAINT_SCRIPT_PATH}\"" "Удаление maintenance-скрипта"
+    fi
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/vps-hardening-maintenance.service.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/vps-hardening-maintenance.service.before\" \"${SYSTEMD_SERVICE_FILE}\"" "Восстановление systemd service"
+  else
+    if [[ -f "$SYSTEMD_SERVICE_FILE" ]]; then
+      run_cmd "rm -f \"${SYSTEMD_SERVICE_FILE}\"" "Удаление systemd service"
+    fi
+  fi
+
+  if [[ -f "${BACKUP_DIR}/files/vps-hardening-maintenance.timer.before" ]]; then
+    run_cmd "cp \"${BACKUP_DIR}/files/vps-hardening-maintenance.timer.before\" \"${SYSTEMD_TIMER_FILE}\"" "Восстановление systemd timer"
+  else
+    run_cmd "systemctl disable --now vps-hardening-maintenance.timer || true" "Отключение timer auto-maintenance"
+    if [[ -f "$SYSTEMD_TIMER_FILE" ]]; then
+      run_cmd "rm -f \"${SYSTEMD_TIMER_FILE}\"" "Удаление systemd timer"
+    fi
+  fi
+
+  run_cmd "systemctl daemon-reload" "Перезагрузка systemd unit-файлов после отката"
 
   run_cmd "ufw --force reload" "Перезагрузка UFW"
 
@@ -770,8 +844,135 @@ step_7_restart_ssh() {
   run_cmd "systemctl status ${SSH_SERVICE} --no-pager" "Проверка статуса SSH-сервиса (${SSH_SERVICE})"
 }
 
-step_8_final_report() {
-  print_step_header "8" "Итоговый отчет" "Выводим все критичные данные для сохранения и подключения."
+step_8_setup_automation() {
+  print_step_header "8" "Автообслуживание сервера" "Включаем автозапуск, автообновление системы и self-update скрипта."
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_warn "[DRY-RUN] Пропущена настройка automation (systemd timer + self-update)"
+    return 0
+  fi
+
+  local source_script="${BASH_SOURCE[0]:-}"
+  if [[ -n "$source_script" && -f "$source_script" ]]; then
+    install -m 700 "$source_script" "$INSTALLED_SCRIPT_PATH"
+    log "Installed main script to: $INSTALLED_SCRIPT_PATH"
+  else
+    print_warn "Источник скрипта не файл (возможно запуск через pipe). Установлена только maintenance-логика."
+    log "Script source path not file, skipped installing $INSTALLED_SCRIPT_PATH"
+  fi
+
+  cat > "$AUTOMATION_CONFIG_FILE" <<EOF
+# VPS hardening automation config
+SELF_UPDATE_ENABLED=1
+SELF_UPDATE_URL="$DEFAULT_SELF_UPDATE_URL"
+SYSTEM_AUTO_UPDATE_ENABLED=1
+COMPONENT_AUTO_UPDATE_ENABLED=1
+EOF
+  chmod 600 "$AUTOMATION_CONFIG_FILE"
+  log "Wrote automation config: $AUTOMATION_CONFIG_FILE"
+
+  cat > "$MAINT_SCRIPT_PATH" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+LOCK_FILE="/var/run/vps_hardening_maint.lock"
+LOG_FILE="/var/log/vps_hardening_maintenance.log"
+CONFIG_FILE="/etc/vps-hardening.conf"
+TARGET_SCRIPT="/usr/local/sbin/vps_hardening.sh"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[$(date '+%F %T')] Another maintenance process is running" >> "$LOG_FILE"
+  exit 0
+fi
+
+source_or_default() {
+  local k="$1"
+  local d="$2"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+  fi
+  eval "echo \"\${$k:-$d}\""
+}
+
+SELF_UPDATE_ENABLED="$(source_or_default SELF_UPDATE_ENABLED 1)"
+SELF_UPDATE_URL="$(source_or_default SELF_UPDATE_URL https://raw.githubusercontent.com/d4f1rz/vps-hardening/master/vps_hardening.sh)"
+SYSTEM_AUTO_UPDATE_ENABLED="$(source_or_default SYSTEM_AUTO_UPDATE_ENABLED 1)"
+COMPONENT_AUTO_UPDATE_ENABLED="$(source_or_default COMPONENT_AUTO_UPDATE_ENABLED 1)"
+
+echo "[$(date '+%F %T')] Maintenance started" >> "$LOG_FILE"
+
+if [[ "$SYSTEM_AUTO_UPDATE_ENABLED" == "1" ]]; then
+  apt update >> "$LOG_FILE" 2>&1
+  DEBIAN_FRONTEND=noninteractive apt upgrade -y >> "$LOG_FILE" 2>&1
+  DEBIAN_FRONTEND=noninteractive apt autoremove -y >> "$LOG_FILE" 2>&1 || true
+fi
+
+if [[ "$COMPONENT_AUTO_UPDATE_ENABLED" == "1" ]]; then
+  DEBIAN_FRONTEND=noninteractive apt install --only-upgrade -y fail2ban ufw openssh-server openssh-client >> "$LOG_FILE" 2>&1 || true
+fi
+
+if [[ "$SELF_UPDATE_ENABLED" == "1" ]]; then
+  TMP_FILE="/tmp/vps_hardening.selfupdate.sh"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$SELF_UPDATE_URL" -o "$TMP_FILE" >> "$LOG_FILE" 2>&1 || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$TMP_FILE" "$SELF_UPDATE_URL" >> "$LOG_FILE" 2>&1 || true
+  fi
+
+  if [[ -s "$TMP_FILE" ]] && bash -n "$TMP_FILE" >/dev/null 2>&1; then
+    install -m 700 "$TMP_FILE" "$TARGET_SCRIPT"
+    echo "[$(date '+%F %T')] Self-update applied to $TARGET_SCRIPT" >> "$LOG_FILE"
+  else
+    echo "[$(date '+%F %T')] Self-update skipped (download/syntax check failed)" >> "$LOG_FILE"
+  fi
+  rm -f "$TMP_FILE"
+fi
+
+echo "[$(date '+%F %T')] Maintenance finished" >> "$LOG_FILE"
+EOF
+
+  chmod 700 "$MAINT_SCRIPT_PATH"
+  log "Wrote maintenance script: $MAINT_SCRIPT_PATH"
+
+  cat > "$SYSTEMD_SERVICE_FILE" <<EOF
+[Unit]
+Description=VPS Hardening maintenance task
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${MAINT_SCRIPT_PATH}
+User=root
+Group=root
+Nice=10
+EOF
+
+  cat > "$SYSTEMD_TIMER_FILE" <<EOF
+[Unit]
+Description=Run VPS Hardening maintenance periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=24h
+Persistent=true
+Unit=vps-hardening-maintenance.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  run_cmd "systemctl daemon-reload" "Перечитывание systemd unit-файлов"
+  run_cmd "systemctl enable --now vps-hardening-maintenance.timer" "Включение timer автозапуска обслуживания"
+  run_cmd "systemctl status vps-hardening-maintenance.timer --no-pager" "Проверка timer обслуживания"
+
+  save_runtime_state
+}
+
+step_9_final_report() {
+  print_step_header "9" "Итоговый отчет" "Выводим все критичные данные для сохранения и подключения."
   get_server_ip
   get_client_ip
 
@@ -793,6 +994,8 @@ step_8_final_report() {
   printf "║ User: %-60s ║\n" "$NEW_USER"
   printf "║ Password: %-56s ║\n" "$NEW_USER_PASSWORD"
   printf "║ Log file: %-56s ║\n" "$LOG_FILE"
+  printf "║ Auto-maint log: %-51s ║\n" "$MAINT_LOG_FILE"
+  printf "║ Auto-maint timer: %-48s ║\n" "vps-hardening-maintenance.timer"
   echo "╚════════════════════════════════════════════════════════════════════╝"
 
   echo
@@ -845,7 +1048,8 @@ main() {
   step_5_configure_ufw
   step_6_configure_fail2ban
   step_7_restart_ssh
-  step_8_final_report
+  step_8_setup_automation
+  step_9_final_report
 }
 
 main "$@"
